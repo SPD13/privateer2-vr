@@ -15,8 +15,10 @@
 #include <string.h>
 #include <share.h>
 #include <vector>
+#include <unordered_map>
 #include "vr.h"
 void Capture_Install(LogFn log);
+void Macro_Start(const char* dir, bool autoplay, LogFn log);
 
 // ---------------------------------------------------------------- addresses (DARK.EXE 1997-10-15)
 static const uintptr_t ADDR_BEGIN = 0x46d517;   // BrZbSceneRenderBegin
@@ -78,6 +80,8 @@ static int   g_starSize = 2;         // VR star size in pixels
 static bool  g_starSprites = true;   // draw star sprites (sun, nebulae) in VR
 static uint8_t* volatile g_game;     // game state pointer captured from the starfield call
 static bool  g_dust = true, g_flare = true;
+static int   g_actorLog = 0;
+static float g_laserWiden = 3.0f, g_laserWidenDist = 60.0f;   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
 static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
 bool Capture_GetPalette(uint8_t out[1024]);
@@ -397,6 +401,104 @@ static void DrawDustVr(uint8_t* buf, int W, int H, float tanH, float tanV, const
     }
 }
 
+
+// ---------------------------------------------------------------- diagnostic: actors appearing near the ship
+struct ActorState { uint8_t type; void* model; int framesLogged; };
+static std::unordered_map<uint8_t*, ActorState> g_actorStates;
+static int g_actorLines;
+
+static void WorldPos(uint8_t* a, float out[3]) {   // translation accumulated up to the world (rotation ignored for parents)
+    out[0] = out[1] = out[2] = 0;
+    for (uint8_t* p = a; p && *(uint8_t**)(p + 0xC); p = *(uint8_t**)(p + 0xC)) {
+        float* m = (float*)(p + ACTOR_T_MAT); out[0] += m[9]; out[1] += m[10]; out[2] += m[11];
+    }
+}
+static void ScanActors(uint8_t* a, int depth, uint8_t* ship, const float sp[3], const float* sm) {
+    for (; a && depth < 4; a = *(uint8_t**)a) {
+        uint8_t type = a[0x12]; void* model = *(void**)(a + 0x18);
+        ActorState& st = g_actorStates[a];
+        bool visible = type == 1 && model;
+        bool wasVisible = st.type == 1 && st.model;
+        if (a != ship && visible && (!wasVisible || st.model != model || st.framesLogged < 3)) {
+            float wp[3]; WorldPos(a, wp);
+            float d[3] = {wp[0] - sp[0], wp[1] - sp[1], wp[2] - sp[2]};
+            float v[3]; for (int k = 0; k < 3; k++) v[k] = d[0] * sm[k*3] + d[1] * sm[k*3 + 1] + d[2] * sm[k*3 + 2];
+            float dist = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+            if (dist < 80.f && g_actorLines < 400) {
+                if (!wasVisible || st.model != model) st.framesLogged = 0;
+                float* m = (float*)(a + ACTOR_T_MAT);
+                float sx = sqrtf(m[0]*m[0] + m[1]*m[1] + m[2]*m[2]), sz = sqrtf(m[6]*m[6] + m[7]*m[7] + m[8]*m[8]);
+                const char* aid = *(const char**)(a + 0x14); const char* mid = model ? *(const char**)((uint8_t*)model + 4) : nullptr;
+                Log("[actor] f%d %p parent=%p depth=%d model=%p '%s'/'%s' ship-space pos (%.2f %.2f %.2f) scale x%.2f z%.2f",
+                    st.framesLogged, a, *(void**)(a + 0xC), depth, model,
+                    (aid && !IsBadReadPtr(aid, 1)) ? aid : "", (mid && !IsBadReadPtr(mid, 1)) ? mid : "", v[0], v[1], v[2], sx, sz);
+                g_actorLines++; st.framesLogged++;
+            }
+        }
+        st.type = type; st.model = model;
+        uint8_t* kids = *(uint8_t**)(a + 8);
+        if (kids) ScanActors(kids, depth + 1, ship, sp, sm);
+    }
+}
+static void LogNewActors() {
+    uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+    if (!game || !wfg) return;
+    uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+    if (!ship) return;
+    float sp[3]; WorldPos(ship, sp);
+    ScanActors(*(uint8_t**)(wfg + 8), 1, ship, sp, (const float*)(ship + ACTOR_T_MAT));
+}
+
+
+// ---------------------------------------------------------------- VR-only: widen the gun origin of shots
+// The game's guns sit at about (+-1.13, -0.23, -1.75) ship units: ~11 cm either side of the eyes in VR, which makes
+// the ship feel narrow. Shots fly straight, so for rendering only we scale their sideways offset by a factor that
+// fades from LASER_WIDEN at the muzzle to 1 at LASER_WIDEN_DIST. Shot models are learned from what spawns at the
+// guns. Positions are restored right after the eye renders, so game logic and hit detection are unchanged.
+static void* g_boltModels[16]; static int g_nBoltModels;
+static std::unordered_map<uint8_t*, bool> g_wasVisible;
+struct MovedActor { float* t; float orig[3]; };
+static MovedActor g_moved[128]; static int g_nMoved;
+
+static bool IsBoltModel(void* m) { for (int i = 0; i < g_nBoltModels; i++) if (g_boltModels[i] == m) return true; return false; }
+
+static void WidenShots() {
+    g_nMoved = 0;
+    uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+    if (!game || !wfg || g_laserWiden == 1.0f) return;
+    uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+    if (!ship) return;
+    const float* sm = (const float*)(ship + ACTOR_T_MAT);
+    const float* sp = sm + 9;
+    for (uint8_t* a = *(uint8_t**)(wfg + 8); a; a = *(uint8_t**)a) {
+        if (a == ship || *(uint8_t**)(a + 0xC) != wfg) continue;
+        bool visible = a[0x12] == 1 && *(void**)(a + 0x18);
+        bool& was = g_wasVisible[a];
+        float* t = (float*)(a + ACTOR_T_MAT) + 9;
+        float d[3] = {t[0] - sp[0], t[1] - sp[1], t[2] - sp[2]};
+        float v[3]; for (int k = 0; k < 3; k++) v[k] = d[0] * sm[k*3] + d[1] * sm[k*3 + 1] + d[2] * sm[k*3 + 2];
+        void* model = *(void**)(a + 0x18);
+        if (visible && !was && fabsf(v[0]) < 4.f && fabsf(v[1]) < 3.f && v[2] < 0.5f && v[2] > -6.f &&
+            !IsBoltModel(model) && g_nBoltModels < 16) {
+            g_boltModels[g_nBoltModels++] = model;
+            Log("[shots] learned shot model %p (spawned at %.2f %.2f %.2f)", model, v[0], v[1], v[2]);
+        }
+        was = visible;
+        if (!visible || !IsBoltModel(model) || g_nMoved >= 128) continue;
+        float ahead = -v[2];
+        if (ahead <= 0.f || ahead >= g_laserWidenDist) continue;
+        float f = 1.0f + (g_laserWiden - 1.0f) * (1.0f - ahead / g_laserWidenDist);
+        float dx = v[0] * (f - 1.0f);                       // extra sideways offset in ship space
+        MovedActor& mv = g_moved[g_nMoved++];
+        mv.t = t; mv.orig[0] = t[0]; mv.orig[1] = t[1]; mv.orig[2] = t[2];
+        for (int k = 0; k < 3; k++) t[k] += dx * sm[k];      // ship X axis in world space = row 0
+    }
+}
+static void RestoreShots() {
+    for (int i = 0; i < g_nMoved; i++) { g_moved[i].t[0] = g_moved[i].orig[0]; g_moved[i].t[1] = g_moved[i].orig[1]; g_moved[i].t[2] = g_moved[i].orig[2]; }
+    g_nMoved = 0;
+}
+
 // ---------------------------------------------------------------- VR eye rendering (milestone 1)
 static std::vector<uint8_t> g_vrDepth;
 static br_pixelmap g_vrPmC, g_vrPmD;
@@ -458,10 +560,11 @@ static void RenderVrEyes() {
     SavedCam s0, s1; SaveCam(s0, (uint8_t*)g_cam[0]); SaveCam(s1, (uint8_t*)g_cam[1]);
     g_inEye2 = true;
     // head (cyclopean) orientation = normalised average of the two eye orientations
-    float qh[4], dotq = 0; for (int k = 0; k < 4; k++) dotq += v[0].quat[k] * v[1].quat[k];
-    float ql = 0; for (int k = 0; k < 4; k++) { qh[k] = v[0].quat[k] + (dotq < 0 ? -v[1].quat[k] : v[1].quat[k]); ql += qh[k] * qh[k]; }
+    float qh[4], dotq = 0; for (int k = 0; k < 4; k++) dotq += v[0].rawQuat[k] * v[1].rawQuat[k];
+    float ql = 0; for (int k = 0; k < 4; k++) { qh[k] = v[0].rawQuat[k] + (dotq < 0 ? -v[1].rawQuat[k] : v[1].rawQuat[k]); ql += qh[k] * qh[k]; }
     ql = sqrtf(ql); for (int k = 0; k < 4; k++) qh[k] /= ql;
     float hh[9]; QuatRows(qh, hh);
+    WidenShots();
     for (int e = 0; e < 2; e++) {
         float h[9]; QuatRows(v[e].quat, h);
         // background camera: head rotation on top of the game's own orientation, no translation
@@ -491,6 +594,7 @@ static void RenderVrEyes() {
         }
     }
     g_inEye2 = false;
+    RestoreShots();
     RestoreCam(s0); RestoreCam(s1);
     uint8_t pal[1024]; GetPalRGBX(pal);
     Vr_SubmitEyes(v, pal);
@@ -575,6 +679,12 @@ extern "C" void __cdecl PostEnd() {
                 if (k != 4) g_loggedDetail = 4;   // log two more Begin calls after each change
             }
             prev[k] = down;
+        }
+        if (g_actorLog) LogNewActors();
+        {   // debug: a file named 'dumpnow' in the game folder triggers a dump (lets tools trigger it)
+            static DWORD lastChk; DWORD nowt = GetTickCount();
+            if (nowt - lastChk > 500) { lastChk = nowt; char f[MAX_PATH]; sprintf_s(f, "%s\\dumpnow", g_dir);
+                if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); g_dumpRequested = true; } }
         }
         if (g_vrEnable && Vr_Active()) {
             if (g_dumpRequested) { g_dumpRequested = false; g_vrDumpNext = true; }
@@ -689,6 +799,17 @@ static bool WriteJmp(uintptr_t at, void* to, const uint8_t* expect, size_t n) {
     return true;
 }
 
+// BrZbSceneRenderBegin rejects pixelmaps over 2048 (0x46d5a3: cmp w,0x800; ja fail; cmp h,0x800; jbe ok).
+static bool LiftSizeLimit() {
+    uint8_t* ja = (uint8_t*)0x46d5a9; uint8_t* jbe = (uint8_t*)0x46d5b1;
+    if (!(ja[0] == 0x77 && ja[1] == 0x08 && jbe[0] == 0x76 && jbe[1] == 0x0d)) return false;
+    DWORD old; VirtualProtect(ja, 16, PAGE_EXECUTE_READWRITE, &old);
+    ja[0] = 0x90; ja[1] = 0x90;     // nop the 'width too big' branch
+    jbe[0] = 0xEB;                  // height check -> unconditional jump to ok
+    VirtualProtect(ja, 16, old, &old); FlushInstructionCache(GetCurrentProcess(), ja, 16);
+    return true;
+}
+
 static void InstallHooks() {
     static const uint8_t endBytes[10] = {0xC7, 0x05, 0x40, 0xE6, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00};
     g_tramp = (void*)Trampoline;
@@ -737,13 +858,18 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_starSize = GetPrivateProfileIntA("VR", "STAR_SIZE", 2, p);
         g_starSprites = GetPrivateProfileIntA("VR", "STAR_SPRITES", 1, p) != 0;
         g_dust = GetPrivateProfileIntA("VR", "DUST", 1, p) != 0;
+        g_actorLog = GetPrivateProfileIntA("VR", "ACTOR_LOG", 0, p);
+        GetPrivateProfileStringA("VR", "LASER_WIDEN", "3.0", b, 32, p); g_laserWiden = (float)atof(b);
+        GetPrivateProfileStringA("VR", "LASER_WIDEN_DIST", "60", b, 32, p); g_laserWidenDist = (float)atof(b);
         g_flare = GetPrivateProfileIntA("VR", "LENS_FLARE", 1, p) != 0;
         GetPrivateProfileStringA("VR", "DUST_SCALE", "1.0", b, 32, p); g_dustScale = (float)atof(b);
         GetPrivateProfileStringA("VR", "WORLD_SCALE", "10", b, 32, p); g_worldScale = (float)atof(b);
         QueryPerformanceFrequency(&g_qpf);
         Log("p2vr loaded: mode=%d ipd=%.3f sweep=%.1f fovscale=%.2f eye=%dx%d", g_mode, g_ipd, g_sweepDeg, g_fovScale, g_eyeW, g_eyeH);
         InstallHooks();
+        if (GetPrivateProfileIntA("VR", "EYE_MAX", 2048, p) > 2048) Log("BRender 2048 size check lifted: %d", LiftSizeLimit());
         if (g_vrEnable) { Capture_Install(Log); Vr_Start(p, Log); }
+        Macro_Start(g_dir, GetPrivateProfileIntA("VR", "AUTOPLAY", 0, p) != 0, Log);
     }
     return TRUE;
 }

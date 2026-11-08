@@ -6,6 +6,8 @@ The game's own Argonaut BRender engine (statically linked into `DARK.EXE`) is dr
 - **3D view:** each eye is re-rendered at headset resolution from the tracked head pose.
 - **Stars, space dust and lens flare:** drawn per eye.
 - **HUD:** a floating panel.
+- **Resolution:** full SteamVR recommended size per eye, with BRender's 2048 px check lifted and each eye frustum centred on its own field of view.
+- **Shots:** they appear to leave from the wings (VR only; hits are unchanged).
 - **Crosshair and target markers:** placed on the ship's boresight plane, so they line up with the lasers and targets.
 - **Menus, base screens and videos:** shown on a virtual screen.
 
@@ -34,6 +36,8 @@ These steps assume Windows, Visual Studio 2026 (x86 toolset) and Python 3.
 | Keys | Action |
 |---|---|
 | Ctrl+F12 | Recenter the view |
+| Ctrl+F2 | Start / stop recording an input macro (`macro.txt`) |
+| Ctrl+F3 | Replay the macro / abort a replay (`AUTOPLAY=1` replays at game start) |
 | Ctrl+F9 | Dump eye images to BMP (debug) |
 | Ctrl+F5/F6/F7 | Spike test modes (when VR is inactive) |
 

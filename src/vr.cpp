@@ -27,7 +27,9 @@ static LogFn Log;
 #define XRCHECK(x) do { XrResult r_ = (x); if (XR_FAILED(r_)) { Log("[vr] %s failed: %d (line %d)", #x, (int)r_, __LINE__); return false; } } while (0)
 
 // ---------------------------------------------------------------- settings (p2vr.ini [VR])
-static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size (capped at 2048)
+static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size
+static int   s_eyeMax = 2048;        // largest eye dimension (BRender's own check is 2048; p2vr patches it out above that)
+static float s_offQuat[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};   // per-eye rotation to the centre of its (asymmetric) fov
 static float s_hudDist = 1.0f, s_hudWidth = 1.5f, s_hudY = 0.0f;
 // Crosshair region of the HUD, shown as its own layer far out on the boresight so it lines up with the lasers.
 static float s_retDist = 30.0f;      // metres (game units = metres * WORLD_SCALE)
@@ -279,17 +281,31 @@ static bool InitXr() {
 }
 
 static bool FinaliseEyeTarget(const XrView v[2]) {
+    // BRender only does symmetric frusta. Instead of one symmetric frustum covering the asymmetric eye fov (wasting
+    // pixels), each eye's render camera is turned to the centre of its own fov and gets a tight symmetric frustum.
+    // The projection layer is submitted with that rotated pose, so the runtime places it exactly.
     float tH = 0, tV = 0;
     for (int i = 0; i < 2; i++) {
-        tH = fmaxf(tH, fmaxf(fabsf(tanf(v[i].fov.angleLeft)), fabsf(tanf(v[i].fov.angleRight))));
-        tV = fmaxf(tV, fmaxf(fabsf(tanf(v[i].fov.angleUp)), fabsf(tanf(v[i].fov.angleDown))));
+        float cH = 0.5f * (v[i].fov.angleLeft + v[i].fov.angleRight), cV = 0.5f * (v[i].fov.angleUp + v[i].fov.angleDown);
+        float hH = 0.5f * (v[i].fov.angleRight - v[i].fov.angleLeft), hV = 0.5f * (v[i].fov.angleUp - v[i].fov.angleDown);
+        tH = fmaxf(tH, tanf(hH)); tV = fmaxf(tV, tanf(hV));
+        // q = yaw(-cH) * pitch(cV)  (yaw about +Y turns -Z to the left; pitch about +X turns -Z up)
+        float yw = -cH * 0.5f, pt = cV * 0.5f;
+        float qy[4] = {0, sinf(yw), 0, cosf(yw)}, qp[4] = {sinf(pt), 0, 0, cosf(pt)};
+        float* q = s_offQuat[i];
+        q[0] = qy[3]*qp[0] + qy[0]*qp[3] + qy[1]*qp[2] - qy[2]*qp[1];
+        q[1] = qy[3]*qp[1] - qy[0]*qp[2] + qy[1]*qp[3] + qy[2]*qp[0];
+        q[2] = qy[3]*qp[2] + qy[0]*qp[1] - qy[1]*qp[0] + qy[2]*qp[3];
+        q[3] = qy[3]*qp[3] - qy[0]*qp[0] - qy[1]*qp[1] - qy[2]*qp[2];
+        Log("[vr] eye %d fov centre yaw %.1f pitch %.1f deg, half %.1f x %.1f deg", i, -cH * 57.29578f, cV * 57.29578f, hH * 57.29578f, hV * 57.29578f);
     }
-    int h = s_target.height; if (h > 2048) h = 2048; if (h < 256) h = 256;
+    int cap = s_eyeMax;
+    int h = s_target.height; if (h > cap) h = cap; if (h < 256) h = 256;
     int w = (int)(h * tH / tV + 0.5f);
-    if (w > 2048) { h = (int)(h * 2048.0f / w); w = 2048; }
+    if (w > cap) { h = (int)(h * (float)cap / w); w = cap; }
     usedFov.angleLeft = -atanf(tH); usedFov.angleRight = atanf(tH);
     usedFov.angleUp = atanf(tV); usedFov.angleDown = -atanf(tV);
-    Log("[vr] eye fov L%.1f R%.1f U%.1f D%.1f -> symmetric %.1fx%.1f deg, render %dx%d",
+    Log("[vr] eye fov L%.1f R%.1f U%.1f D%.1f -> centred symmetric %.1fx%.1f deg, render %dx%d",
         v[0].fov.angleLeft * 57.29578f, v[0].fov.angleRight * 57.29578f, v[0].fov.angleUp * 57.29578f, v[0].fov.angleDown * 57.29578f,
         2 * atanf(tH) * 57.29578f, 2 * atanf(tV) * 57.29578f, w, h);
     for (int e = 0; e < 2; e++) {
@@ -490,8 +506,12 @@ static void FrameLoop() {
             EnterCriticalSection(&s_cs);
             for (int e = 0; e < 2; e++) {
                 s_views[e].pos[0] = xv[e].pose.position.x; s_views[e].pos[1] = xv[e].pose.position.y; s_views[e].pos[2] = xv[e].pose.position.z;
-                s_views[e].quat[0] = xv[e].pose.orientation.x; s_views[e].quat[1] = xv[e].pose.orientation.y;
-                s_views[e].quat[2] = xv[e].pose.orientation.z; s_views[e].quat[3] = xv[e].pose.orientation.w;
+                const XrQuaternionf& a = xv[e].pose.orientation; const float* b = s_offQuat[e];   // render = eye * offset
+                s_views[e].rawQuat[0] = a.x; s_views[e].rawQuat[1] = a.y; s_views[e].rawQuat[2] = a.z; s_views[e].rawQuat[3] = a.w;
+                s_views[e].quat[0] = a.w*b[0] + a.x*b[3] + a.y*b[2] - a.z*b[1];
+                s_views[e].quat[1] = a.w*b[1] - a.x*b[2] + a.y*b[3] + a.z*b[0];
+                s_views[e].quat[2] = a.w*b[2] + a.x*b[1] - a.y*b[0] + a.z*b[3];
+                s_views[e].quat[3] = a.w*b[3] - a.x*b[0] - a.y*b[1] - a.z*b[2];
             }
             s_viewsValid = true;
             LeaveCriticalSection(&s_cs);
@@ -574,6 +594,7 @@ void Vr_Start(const char* ini, LogFn log) {
     Log = log;
     InitializeCriticalSection(&s_cs);
     s_eyeScale = IniF(ini, "EYE_SCALE", 1.0f);
+    s_eyeMax = (int)IniF(ini, "EYE_MAX", 2048.0f); if (s_eyeMax < 512) s_eyeMax = 512; if (s_eyeMax > 8192) s_eyeMax = 8192;
     s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 1.5f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
     s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retFrac = IniF(ini, "RETICLE_SIZE", 0.16f);
     s_screenDist = IniF(ini, "SCREEN_DIST", 2.5f); s_screenWidth = IniF(ini, "SCREEN_WIDTH", 3.2f);

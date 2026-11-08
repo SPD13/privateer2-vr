@@ -6,7 +6,7 @@
 typedef void (*LogFn)(const char* fmt, ...);
 
 // Eye view in the LOCAL reference space (metres, OpenXR conventions: +Y up, -Z forward).
-struct VrView { float pos[3]; float quat[4]; /* x,y,z,w */ };
+struct VrView { float pos[3]; float quat[4]; /* render orientation x,y,z,w */ float rawQuat[4]; /* eye orientation */ };
 
 struct VrEyeTarget {
     int   width, height;      // render size of each eye (<= 2048, BRender limit)

@@ -60,6 +60,14 @@ Target binary: `DARK.EXE` from the Steam 30th Anniversary Edition. It is the Win
 
   BrZbSceneRenderBegin caps pixelmaps at 2048×2048.
 
+## Size limit
+- BrZbSceneRenderBegin rejects pixelmaps over 2048 in two places: `0x46D5A3 cmp w,0x800 ; ja` (0x46D5A9 `77 08`) and `cmp h,0x800 ; jbe` (0x46D5B1 `76 0D`).
+- Patching both branches away works. 2648×2644 renders correctly, and there are no other 2048-sized tables.
+
+## Shots
+- Gun bolts are model actors that are direct children of the foreground world.
+- They spawn at ship-space (±1.13, -0.23, -1.75) and fly straight and parallel (no convergence) at about 7.3 units per frame.
+
 ## Game state (eax of the frame and star functions)
 - `+0x279DC`: stars. 650 entries of 16 bytes: `float dir[3]`, u8 colour at +0xC, s16 sprite at +0xE (0xFFFF = point star, 0x28 = sun).
 - `+0x279E0`: dust particles, 10 × float4.
