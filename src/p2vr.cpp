@@ -41,6 +41,7 @@ static const int GAME_DUST = 0x279e0, SHIP_POSPTR = 0x127c;
 // HUD markers (target brackets, lead indicator, nav markers): FUN_00453b00, called once from the flight frame
 static const uintptr_t ADDR_MARKERS_FN   = 0x453b00;
 static const uintptr_t ADDR_MARKERS_CALL = 0x439ac3;   // E8 rel32 call site
+static const uintptr_t ADDR_HUD_FN = 0x454b5c, ADDR_HUD_CALL = 0x439adb;   // static HUD
 static const int GAME_STARS = 0x279dc, GAME_SHIPIDX = 0x27858, GAME_SHIPS = 0x1210, SHIP_STRIDE = 0x3a0, NUM_STARS = 0x28a;
 static const uint8_t   BEGIN_PROLOGUE[6] = {0x56, 0x57, 0xC8, 0x34, 0x00, 0x00}; // push esi; push edi; enter 0x34,0
 
@@ -522,6 +523,14 @@ static std::vector<uint8_t> g_scene; static int g_sceneW, g_sceneH; static bool 
 // After FUN_00453b00 drew the 3D-projected HUD markers into the (cleared) game buffer: take them out as their own
 // layer for VR (placed on the far boresight plane with the game's exact FOV), add them to the monitor mirror, and
 // clear the buffer again so p2den / the HUD panel only carries the static HUD.
+static bool g_hudDumpNext; static int g_hudDumpIdx;
+extern "C" void __cdecl PostHud() {   // debug: save the 8-bit static HUD (and markers image) on dump requests
+    if (!g_hudDumpNext || !g_lastCol) return;
+    g_hudDumpNext = false;
+    PALETTEENTRY pal[256]; GetPal(pal); char n[64];
+    sprintf_s(n, "hud_%02d.bmp", g_hudDumpIdx++); WriteBmp(n, (br_pixelmap*)g_lastCol, pal);
+}
+
 extern "C" void __cdecl PostMarkers() {
     if (!g_markersPending || !g_lastCol) return;
     g_markersPending = false;
@@ -534,6 +543,10 @@ extern "C" void __cdecl PostMarkers() {
     }
     uint8_t pal[1024]; GetPalRGBX(pal);
     Vr_SubmitMarkers(mk.data(), w, h, pal);
+    if (g_hudDumpNext) {
+        br_pixelmap pm = *gc; pm.pixels = mk.data(); pm.base_x = pm.base_y = 0; pm.row_bytes = (int16_t)w;
+        PALETTEENTRY pe[256]; GetPal(pe); char n[64]; sprintf_s(n, "markers_%02d.bmp", g_hudDumpIdx); WriteBmp(n, &pm, pe);
+    }
     if ((int)g_scene.size() == w * h) {
         for (size_t i = 0; i < mk.size(); i++) if (mk[i]) g_scene[i] = mk[i];
         Capture_SetMirror(g_scene.data(), w, h, pal);
@@ -687,7 +700,7 @@ extern "C" void __cdecl PostEnd() {
                 if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); g_dumpRequested = true; } }
         }
         if (g_vrEnable && Vr_Active()) {
-            if (g_dumpRequested) { g_dumpRequested = false; g_vrDumpNext = true; }
+            if (g_dumpRequested) { g_dumpRequested = false; g_vrDumpNext = true; g_hudDumpNext = true; }
             RenderVrEyes();
         } else if (g_mode == 2) {
             RenderRightEye();
@@ -725,6 +738,7 @@ extern "C" void __cdecl PostEnd() {
 static uintptr_t g_beginCont = ADDR_BEGIN + 6;
 static uintptr_t g_starsCont = ADDR_STARS_FN + 6;
 static uintptr_t g_markersFn = ADDR_MARKERS_FN;
+static uintptr_t g_hudFn = ADDR_HUD_FN;
 
 __declspec(naked) static void Trampoline() {
     __asm {
@@ -771,6 +785,16 @@ __declspec(naked) static void HookMarkersCall() {
         call dword ptr [g_markersFn]
         pushad
         call PostMarkers
+        popad
+        ret
+    }
+}
+
+__declspec(naked) static void HookHudCall() {
+    __asm {
+        call dword ptr [g_hudFn]
+        pushad
+        call PostHud
         popad
         ret
     }
@@ -823,7 +847,13 @@ static void InstallHooks() {
         *(int32_t*)(ADDR_MARKERS_CALL + 1) = (int32_t)((uintptr_t)HookMarkersCall - (ADDR_MARKERS_CALL + 5));
         VirtualProtect((void*)ADDR_MARKERS_CALL, 5, old, &old); d = true;
     }
-    Log("hooks: begin=%d end=%d stars=%d markers=%d", a, b, c, d);
+    bool e = false;
+    if (*(uint8_t*)ADDR_HUD_CALL == 0xE8 && ADDR_HUD_CALL + 5 + *(int32_t*)(ADDR_HUD_CALL + 1) == ADDR_HUD_FN) {
+        DWORD old; VirtualProtect((void*)ADDR_HUD_CALL, 5, PAGE_EXECUTE_READWRITE, &old);
+        *(int32_t*)(ADDR_HUD_CALL + 1) = (int32_t)((uintptr_t)HookHudCall - (ADDR_HUD_CALL + 5));
+        VirtualProtect((void*)ADDR_HUD_CALL, 5, old, &old); e = true;
+    }
+    Log("hooks: begin=%d end=%d stars=%d markers=%d hud=%d", a, b, c, d, e);
 }
 
 // ---------------------------------------------------------------- DirectDrawCreate wrapper (forwarded to p2den)

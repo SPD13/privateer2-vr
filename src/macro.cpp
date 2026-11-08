@@ -138,6 +138,11 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             } else StartReplay();
             return 1;   // swallow the hotkey
         }
+        // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
+        if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
+            static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
+            return 1;
+        }
         if (s_recording && !injected && GameHasFocus() && k->vkCode != VK_F2 && k->vkCode != VK_F3)
             Add('K', (int)k->scanCode, (up ? 1 : 0) | ((k->flags & LLKHF_EXTENDED) ? 2 : 0), (int)k->vkCode);
     }
@@ -145,6 +150,11 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
 }
 
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
+    // during a replay, the real mouse must not move the pointer or click while the game is in front
+    if (code == HC_ACTION && s_replaying && !(((MSLLHOOKSTRUCT*)lp)->flags & LLMHF_INJECTED) && GameHasFocus()) {
+        static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real mouse input ignored during replay (Ctrl+F3 aborts)"); }
+        return 1;
+    }
     if (code == HC_ACTION && s_recording) {
         auto* m = (MSLLHOOKSTRUCT*)lp;
         if (!(m->flags & LLMHF_INJECTED) && GameHasFocus()) {

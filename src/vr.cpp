@@ -33,7 +33,7 @@ static float s_offQuat[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};   // per-eye rotati
 static float s_hudDist = 1.0f, s_hudWidth = 1.5f, s_hudY = 0.0f;
 // Crosshair region of the HUD, shown as its own layer far out on the boresight so it lines up with the lasers.
 static float s_retDist = 30.0f;      // metres (game units = metres * WORLD_SCALE)
-static float s_retFrac = 0.16f;      // size of the crosshair region as a fraction of the HUD width
+static float s_retFrac = 0.20f;      // size of the crosshair region as a fraction of the HUD width
 static const int HUD_PX_W = 1600, HUD_PX_H = 1200;
 static int s_retPx = 256;            // crosshair crop size in swapchain pixels
 // Game camera: focal length 461.0357 px on a 640x480 image -> tan of the half angles
@@ -596,7 +596,7 @@ void Vr_Start(const char* ini, LogFn log) {
     s_eyeScale = IniF(ini, "EYE_SCALE", 1.0f);
     s_eyeMax = (int)IniF(ini, "EYE_MAX", 2048.0f); if (s_eyeMax < 512) s_eyeMax = 512; if (s_eyeMax > 8192) s_eyeMax = 8192;
     s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 1.5f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
-    s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retFrac = IniF(ini, "RETICLE_SIZE", 0.16f);
+    s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retFrac = IniF(ini, "RETICLE_SIZE", 0.20f);
     s_screenDist = IniF(ini, "SCREEN_DIST", 2.5f); s_screenWidth = IniF(ini, "SCREEN_WIDTH", 3.2f);
     s_keyGain = IniF(ini, "HUD_KEY_GAIN", 40.0f); s_keyThresh = IniF(ini, "HUD_KEY_THRESHOLD", 0.03f);
     CreateThread(nullptr, 0, VrThread, nullptr, 0, nullptr);
