@@ -1,0 +1,15 @@
+# Game files (copyrighted, from the user's own Steam install) and saves
+game/
+# Downloaded tools / third-party references (re-downloadable, large)
+tools/
+ref/
+# Build output
+build/
+# Ghidra project and raw decompiler output of the game (reconstructed proprietary code)
+notes/ghidra_proj/
+notes/decomp_*.c
+notes/*.log
+notes/vcalls.txt
+# Raw capture dumps
+captures/run*/
+*.bmp
