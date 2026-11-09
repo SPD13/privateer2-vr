@@ -28,9 +28,10 @@ static LogFn Log;
 
 // ---------------------------------------------------------------- settings (p2vr.ini [VR])
 // ---------------------------------------------------------------- controller actions
-static XrActionSet s_actSet; static XrAction s_actStickR, s_actStickL, s_actRecenter, s_actBtn[VB_COUNT];
+static XrActionSet s_actSet; static XrAction s_actStickR, s_actStickL, s_actRecenter, s_actBtn[kVrCommandCount];
 // laser pointer for menus / films (outside flight): aim pose, left and right click
-static XrAction s_actAim, s_actClick, s_actRClick; static XrSpace s_aimSpace;
+static XrAction s_actAim, s_actClick, s_actRClick, s_actEsc; static XrSpace s_aimSpace;
+static bool s_frameExt;   // XR_VALVE_frame_controller_interaction enabled
 static bool s_actionsReady; static CRITICAL_SECTION s_ctlCs; static VrControls s_ctl;
 static float s_deadzone = 0.15f;
 static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size
@@ -322,13 +323,11 @@ static void CreateActions() {
     bool ok = MakeAction(&s_actStickR, "pitch_yaw", "Pitch / Yaw", XR_ACTION_TYPE_VECTOR2F_INPUT) &&
               MakeAction(&s_actStickL, "roll_throttle", "Roll / Throttle", XR_ACTION_TYPE_VECTOR2F_INPUT) &&
               MakeAction(&s_actRecenter, "recenter", "Recenter view", XR_ACTION_TYPE_BOOLEAN_INPUT);
-    static const char* names[VB_COUNT][2] = {{"fire_guns", "Fire guns"}, {"fire_missile", "Fire missile"}, {"afterburner", "Afterburner"},
-        {"match_speed", "Match target speed"}, {"cycle_target", "Cycle targets"}, {"target_hostile", "Target nearest hostile"},
-        {"cycle_weapon", "Cycle weapons"}, {"jump", "Jump"}, {"speed_zero", "Speed to zero"}};
-    for (int i = 0; i < VB_COUNT && ok; i++) ok = MakeAction(&s_actBtn[i], names[i][0], names[i][1], XR_ACTION_TYPE_BOOLEAN_INPUT);
+    for (int i = 0; i < kVrCommandCount && ok; i++) ok = MakeAction(&s_actBtn[i], kVrCommands[i].action, kVrCommands[i].label, XR_ACTION_TYPE_BOOLEAN_INPUT);
     ok = ok && MakeAction(&s_actAim, "pointer", "Menu pointer", XR_ACTION_TYPE_POSE_INPUT) &&
          MakeAction(&s_actClick, "menu_click", "Menu click", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
-         MakeAction(&s_actRClick, "menu_right_click", "Menu right click (cycle hotspots)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+         MakeAction(&s_actRClick, "menu_right_click", "Menu right click (cycle hotspots)", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
+         MakeAction(&s_actEsc, "menu_escape", "Menu escape / skip film (Esc)", XR_ACTION_TYPE_BOOLEAN_INPUT);
     if (!ok) { Log("[ctl] xrCreateAction failed"); return; }
 
     struct B { XrAction a; const char* path; };
@@ -340,28 +339,20 @@ static void CreateActions() {
         XrResult r = xrSuggestInteractionProfileBindings(inst, &sb);
         Log("[ctl] default bindings for %s: %s", profile, XR_SUCCEEDED(r) ? "ok" : "rejected");
     };
-    const B index[] = {
-        {s_actStickR, "/user/hand/right/input/thumbstick"}, {s_actStickL, "/user/hand/left/input/thumbstick"},
-        {s_actRecenter, "/user/hand/right/input/thumbstick/click"},
-        {s_actBtn[VB_GUNS], "/user/hand/right/input/trigger/value"}, {s_actBtn[VB_MISSILE], "/user/hand/left/input/trigger/value"},
-        {s_actBtn[VB_AFTERBURNER], "/user/hand/right/input/squeeze/value"}, {s_actBtn[VB_MATCH_SPEED], "/user/hand/left/input/squeeze/value"},
-        {s_actBtn[VB_CYCLE_TARGET], "/user/hand/right/input/a/click"}, {s_actBtn[VB_TARGET_HOSTILE], "/user/hand/right/input/b/click"},
-        {s_actBtn[VB_CYCLE_WEAPON], "/user/hand/left/input/a/click"}, {s_actBtn[VB_JUMP], "/user/hand/left/input/b/click"},
-        {s_actBtn[VB_SPEED_ZERO], "/user/hand/left/input/thumbstick/click"},
-        {s_actAim, "/user/hand/right/input/aim/pose"}, {s_actClick, "/user/hand/right/input/trigger/value"},
-        {s_actRClick, "/user/hand/right/input/squeeze/value"}};
-    suggest("/interaction_profiles/valve/index_controller", index, sizeof index / sizeof index[0]);
-    const B touch[] = {
-        {s_actStickR, "/user/hand/right/input/thumbstick"}, {s_actStickL, "/user/hand/left/input/thumbstick"},
-        {s_actRecenter, "/user/hand/right/input/thumbstick/click"},
-        {s_actBtn[VB_GUNS], "/user/hand/right/input/trigger/value"}, {s_actBtn[VB_MISSILE], "/user/hand/left/input/trigger/value"},
-        {s_actBtn[VB_AFTERBURNER], "/user/hand/right/input/squeeze/value"}, {s_actBtn[VB_MATCH_SPEED], "/user/hand/left/input/squeeze/value"},
-        {s_actBtn[VB_CYCLE_TARGET], "/user/hand/right/input/a/click"}, {s_actBtn[VB_TARGET_HOSTILE], "/user/hand/right/input/b/click"},
-        {s_actBtn[VB_CYCLE_WEAPON], "/user/hand/left/input/x/click"}, {s_actBtn[VB_JUMP], "/user/hand/left/input/y/click"},
-        {s_actBtn[VB_SPEED_ZERO], "/user/hand/left/input/thumbstick/click"},
-        {s_actAim, "/user/hand/right/input/aim/pose"}, {s_actClick, "/user/hand/right/input/trigger/value"},
-        {s_actRClick, "/user/hand/right/input/squeeze/value"}};
-    suggest("/interaction_profiles/oculus/touch_controller", touch, sizeof touch / sizeof touch[0]);
+    for (int prof = 0; prof < 3; prof++) {
+        if (prof == 2 && !s_frameExt) break;
+        std::vector<B> v = {{s_actStickR, "/user/hand/right/input/thumbstick"}, {s_actStickL, "/user/hand/left/input/thumbstick"},
+                            {s_actRecenter, "/user/hand/right/input/thumbstick/click"},
+                            {s_actAim, "/user/hand/right/input/aim/pose"}, {s_actClick, "/user/hand/right/input/trigger/value"},
+                            {s_actRClick, "/user/hand/right/input/squeeze/value"},
+                            {s_actEsc, "/user/hand/left/input/trigger/value"}};
+        for (int i = 0; i < kVrCommandCount; i++) {
+            const char* path = prof == 0 ? kVrCommands[i].indexPath : prof == 1 ? kVrCommands[i].touchPath : kVrCommands[i].framePath;
+            if (path) v.push_back({s_actBtn[i], path});
+        }
+        suggest(prof == 0 ? "/interaction_profiles/valve/index_controller" : prof == 1 ? "/interaction_profiles/oculus/touch_controller"
+                                                                             : "/interaction_profiles/valve/frame_controller_valve", v.data(), (int)v.size());
+    }
 
     XrSessionActionSetsAttachInfo ai = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO}; ai.countActionSets = 1; ai.actionSets = &s_actSet;
     s_actionsReady = XR_SUCCEEDED(xrAttachSessionActionSets(sess, &ai));
@@ -430,6 +421,11 @@ static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW
     if (front && click != s_clickWas) MouseButton(click ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
     if (front && rclick != s_rclickWas) MouseButton(rclick ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
     s_clickWas = click; s_rclickWas = rclick;
+    // Escape (skip films, leave screens)
+    static bool escWas;
+    b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actEsc; bool esc = XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState;
+    if (front && esc != escWas) { INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wScan = 0x01; in.ki.dwFlags = KEYEVENTF_SCANCODE | (esc ? 0 : KEYEVENTF_KEYUP); SendInput(1, &in, sizeof in); }
+    escWas = esc;
 }
 // Beam: a thin quad from the controller to the hit point, turned around its axis to face the viewer.
 static bool BeamLayer(XrCompositionLayerQuad& q, const XrVector3f& head) {
@@ -475,9 +471,9 @@ static void PollControls(bool focused) {
             v = {XR_TYPE_ACTION_STATE_VECTOR2F};
             gi.action = s_actStickL; if (XR_SUCCEEDED(xrGetActionStateVector2f(sess, &gi, &v)) && v.isActive) { c.roll = Dead(v.currentState.x); c.throttleRate = Dead(v.currentState.y); any = true; }
             XrActionStateBoolean b = {XR_TYPE_ACTION_STATE_BOOLEAN};
-            for (int i = 0; i < VB_COUNT; i++) {
+            for (int i = 0; i < kVrCommandCount; i++) {
                 b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actBtn[i];
-                if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive) { any = true; if (b.currentState) c.buttons |= 1u << i; }
+                if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive) { any = true; if (b.currentState) c.buttons |= 1ull << i; }
             }
             b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actRecenter;
             if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState && b.changedSinceLastSync) Vr_RequestRecenter();
@@ -488,7 +484,7 @@ static void PollControls(bool focused) {
     if (c.active != wasActive) { wasActive = c.active; Log("[ctl] VR controllers %s", c.active ? "active" : "inactive"); }
     if (GetTickCount() - lastDiag > 5000) {
         lastDiag = GetTickCount();
-        Log("[ctl] state: session %d focused %d actions %d active %d | R(%.2f %.2f) L(%.2f %.2f) buttons %03x",
+        Log("[ctl] state: session %d focused %d actions %d active %d | R(%.2f %.2f) L(%.2f %.2f) buttons %llx",
             (int)sessState, focused, s_actionsReady, c.active, c.yaw, c.pitch, c.roll, c.throttleRate, c.buttons);
     }
     EnterCriticalSection(&s_ctlCs); s_ctl = c; LeaveCriticalSection(&s_ctlCs);
@@ -501,12 +497,19 @@ static bool InitXr() {
         const char* def = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\steamxr_win32.json";
         if (GetFileAttributesA(def) != INVALID_FILE_ATTRIBUTES) SetEnvironmentVariableA("XR_RUNTIME_JSON", def);
     }
-    const char* exts[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+    // Steam Frame controllers get their own profile when the runtime offers it (otherwise SteamVR remaps Touch)
+    uint32_t nExt = 0; xrEnumerateInstanceExtensionProperties(nullptr, 0, &nExt, nullptr);
+    std::vector<XrExtensionProperties> props(nExt, {XR_TYPE_EXTENSION_PROPERTIES});
+    xrEnumerateInstanceExtensionProperties(nullptr, nExt, &nExt, props.data());
+    s_frameExt = false;
+    for (auto& e : props) if (!strcmp(e.extensionName, "XR_VALVE_frame_controller_interaction")) s_frameExt = true;
+    const char* exts[2] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME, "XR_VALVE_frame_controller_interaction"};
     XrInstanceCreateInfo ici = {XR_TYPE_INSTANCE_CREATE_INFO};
     strcpy_s(ici.applicationInfo.applicationName, "Privateer 2 VR");
     strcpy_s(ici.applicationInfo.engineName, "BRender");
     ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-    ici.enabledExtensionCount = 1; ici.enabledExtensionNames = exts;
+    ici.enabledExtensionCount = s_frameExt ? 2 : 1; ici.enabledExtensionNames = exts;
+    Log("[ctl] Steam Frame controller profile extension: %s", s_frameExt ? "available" : "not offered");
     XRCHECK(xrCreateInstance(&ici, &inst));
     XrSystemGetInfo sgi = {XR_TYPE_SYSTEM_GET_INFO}; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XRCHECK(xrGetSystem(inst, &sgi, &sysId));
@@ -865,6 +868,7 @@ static void FrameLoop() {
         XrCompositionLayerQuad quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad reticle = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad beam = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad tip = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         if (targetDone && sessState == XR_SESSION_STATE_FOCUSED) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
         else s_ptrHit = false;
         XrCompositionLayerQuad marks[MAX_BLOBS];
@@ -947,6 +951,14 @@ static void FrameLoop() {
         if (!flight && haveScreen && targetDone && sessState == XR_SESSION_STATE_FOCUSED && fs.shouldRender) {
             XrVector3f head = {(s_views[0].pos[0] + s_views[1].pos[0]) * 0.5f, (s_views[0].pos[1] + s_views[1].pos[1]) * 0.5f, (s_views[0].pos[2] + s_views[1].pos[2]) * 0.5f};
             if (BeamLayer(beam, head)) layers.push_back((XrCompositionLayerBaseHeader*)&beam);
+            if (s_ptrHit && beamReady) {   // aiming dot where the beam meets the screen (exact click point, any cursor graphic)
+                tip.space = localSpace; tip.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                tip.subImage.swapchain = beamSc.sc; tip.subImage.imageRect = {{0, 0}, {beamSc.w, beamSc.h}};
+                tip.size = {0.012f, 0.012f};
+                tip.pose = {{0, 0, 0, 1}, {s_ptrTo.x, s_ptrTo.y, s_ptrTo.z + 0.005f}};
+                tip.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                layers.push_back((XrCompositionLayerBaseHeader*)&tip);
+            }
         }
         XrFrameEndInfo fei = {XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime; fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;

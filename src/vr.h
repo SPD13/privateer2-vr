@@ -28,13 +28,12 @@ void Vr_SetScreenSource(HANDLE sharedTex, int w, int h, uint32_t frameNo);  // f
 void Vr_RequestRecenter();
 
 // ---- VR controllers (OpenXR actions; remappable in SteamVR's controller binding screen)
-enum VrButton { VB_GUNS, VB_MISSILE, VB_AFTERBURNER, VB_MATCH_SPEED, VB_CYCLE_TARGET, VB_TARGET_HOSTILE,
-                VB_CYCLE_WEAPON, VB_JUMP, VB_SPEED_ZERO, VB_COUNT };
+#include "commands.h"   // game commands = SteamVR actions
 struct VrControls {
     bool  active;                 // session focused and controller actions available
     float pitch, yaw;             // right stick: -1..1 (pitch +: stick forward)
     float roll, throttleRate;     // left stick: roll -1..1 (+ right), throttle rate -1..1 (+ forward)
-    uint32_t buttons;             // bit per VrButton (held)
+    uint64_t buttons;             // bit per kVrCommands entry (held)
 };
 bool Vr_GetControls(VrControls* c);
 void Vr_SetReticleDistance(float metres);   // depth of what is under the crosshair (<= 0: use RETICLE_DIST)

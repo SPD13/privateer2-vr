@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#include <ctype.h>
 #include <share.h>
 #include <vector>
 #include <unordered_map>
@@ -104,7 +105,7 @@ static int   g_smooth = 1;
 static bool  g_ctlEnable = true;
 static float g_rollGain = 2.5f, g_yawGain = 1.0f, g_pitchGain = 1.0f, g_throttleRate = 0.6f;
 static bool  g_invertPitch = false, g_invertRoll = false;
-static uint8_t g_keyFor[VB_COUNT] = {0x39, 0x1C, 0x0F, 0x2D, 0x1E, 0x11, 0x23, 0x24, 0x1A};   // DirectInput scancodes
+static uint8_t g_keyFor[kVrCommandCount]; static bool g_altFor[kVrCommandCount];   // game key per command (scancode, +Alt)
 static volatile bool g_rollActive; static volatile float g_rollValue;           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
 static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
@@ -1236,7 +1237,7 @@ static void RenderVrEyes() {
 // 0x4503f6: after all of the game's and p2den's input handling, before the game's own damage scaling and invert
 // option. The throttle sets the speed setpoint (+0x1298) only while the throttle stick is used. Buttons are sent
 // as real key presses (scancodes), so they pass through p2den's input layer like a keyboard.
-static float g_throttle = -1; static LONGLONG g_lastCtl; static uint32_t g_prevButtons; static bool g_ctlOn;
+static float g_throttle = -1; static LONGLONG g_lastCtl; static uint64_t g_prevButtons; static bool g_ctlOn;
 static volatile float g_pitchValue, g_yawValue, g_speedValue; static volatile bool g_speedActive;
 
 static void SendKey(uint8_t sc, bool down) {
@@ -1245,8 +1246,12 @@ static void SendKey(uint8_t sc, bool down) {
     SendInput(1, &in, sizeof in);
 }
 static bool GameInFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
+static void CommandKey(int i, bool down) {   // the game's key for a command, with left Alt where needed
+    if (down) { if (g_altFor[i]) SendKey(0x38, true); SendKey(g_keyFor[i], true); }
+    else { SendKey(g_keyFor[i], false); if (g_altFor[i]) SendKey(0x38, false); }
+}
 static void ReleaseVrKeys() {
-    for (int i = 0; i < VB_COUNT; i++) if ((g_prevButtons & (1u << i)) && i != VB_SPEED_ZERO) SendKey(g_keyFor[i], false);
+    for (int i = 0; i < kVrCommandCount; i++) if (g_prevButtons & (1ull << i)) CommandKey(i, false);
     g_prevButtons = 0;
 }
 // Once per game cycle (game thread): compute the values the roll-write hook puts into the flight controls.
@@ -1265,24 +1270,93 @@ static void UpdateControlMode() {
     g_rollValue  = -c.roll * g_rollGain * (g_invertRoll ? -1.f : 1.f);
     g_rollActive = true;
     // throttle: follow the game's setting unless the throttle stick / speed-zero is used
-    bool zero = (c.buttons >> VB_SPEED_ZERO) & 1;
-    if (maxSpd > 0 && (c.throttleRate != 0 || zero)) {
+    if (maxSpd > 0 && c.throttleRate != 0) {   // (speed keys like "speed to zero" are the game's own commands)
         if (!g_speedActive) { g_throttle = *(float*)(entry + 0x1298) / maxSpd; }
         g_throttle += (float)(c.throttleRate * g_throttleRate * dt);
-        if (zero) g_throttle = 0;
         if (g_throttle < 0) g_throttle = 0; if (g_throttle > 1) g_throttle = 1;
         g_speedValue = g_throttle * maxSpd; g_speedActive = true;
     } else g_speedActive = false;
     // buttons -> key presses (only into the game window)
     bool front = GameInFront();
-    for (int i = 0; i < VB_COUNT; i++) {
-        if (i == VB_SPEED_ZERO) continue;
+    for (int i = 0; i < kVrCommandCount; i++) {
         bool down = front && ((c.buttons >> i) & 1), was = (g_prevButtons >> i) & 1;
-        if (down != was) SendKey(g_keyFor[i], down);
+        if (down != was) CommandKey(i, down);
     }
     g_prevButtons = front ? c.buttons : 0;
 }
 extern "C" void __cdecl ApplyStick() {}   // joystick path no longer used (kept as a no-op hook)
+
+// ---------------------------------------------------------------- 2D sprite hook (menus / PAD)
+// Both sprite blitters (0x41305a, 0x4144e0; cdecl view, shapes, id, x, y) pass through SpriteFilter, which can move a
+// sprite before it is drawn. Used to put the PAD's cursor sprite exactly on the pointer (its drawing is offset).
+static DWORD g_lastFlightTick;
+static int g_cursorId = -1, g_cursorDx = 0, g_cursorDy = 0; static void* g_cursorShapes;
+static bool g_spriteLog = false;
+static void CursorGamePos(int* gx, int* gy) {   // Windows cursor -> game 640x480 coordinates (4:3 area of the window)
+    *gx = *gy = -1;
+    HWND w = nullptr; DWORD pid; POINT pt; if (!GetCursorPos(&pt)) return;
+    w = WindowFromPoint(pt); if (!w) return; GetWindowThreadProcessId(w, &pid); if (pid != GetCurrentProcessId()) return;
+    ScreenToClient(w, &pt); RECT r; GetClientRect(w, &r);
+    float vw = r.bottom * 4.f / 3.f, vh = (float)r.bottom; if (vw > r.right) { vw = (float)r.right; vh = r.right * 3.f / 4.f; }
+    float ox = (r.right - vw) * 0.5f, oy = (r.bottom - vh) * 0.5f;
+    *gx = (int)((pt.x - ox) * 640.f / vw); *gy = (int)((pt.y - oy) * 480.f / vh);
+}
+// The blitter draws at view origin (view+4, view+8) + (x, y). The PAD (0x436390) draws its cursor, its shadow and the
+// background restore 80x80 all shifted by its screen's origin (60,23), so the cursor sits right/down of the pointer.
+// CURSOR_FIX moves all three onto the pointer: the cursor here, the restore and shadow offsets by byte patches.
+static bool g_cursorFix = true;
+extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
+    if (GetTickCount() - g_lastFlightTick < 500) return;            // only menus / films / PAD
+    if (g_cursorId >= 0 && id == g_cursorId && (!g_cursorShapes || shapes == g_cursorShapes)) { xy[0] += g_cursorDx; xy[1] += g_cursorDy; }
+    // PAD cursor (drawn from 0x4364fd into the PAD view, origin 60,23): draw it at the pointer itself
+    if (g_cursorFix && view && xy[-4] == 0x436502) { xy[0] -= view[1]; xy[1] -= view[2]; }
+    if (!g_spriteLog) return;
+    static int lastX[1024], lastY[1024]; static DWORD lastLog[1024];
+    int k = id & 1023;
+    if ((xy[0] != lastX[k] || xy[1] != lastY[k]) && GetTickCount() - lastLog[k] > 400) {
+        int cx, cy; CursorGamePos(&cx, &cy);
+        const int32_t* sh = (const int32_t*)shapes; int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+        if (sh) { const int32_t* e = (const int32_t*)((const uint8_t*)sh + sh[id * 2 + 2]); bx0 = e[2]; by0 = e[3]; bx1 = e[4]; by1 = e[5]; }
+        Log("[sprite] id %d shapes %p at (%d,%d) bounds (%d,%d)-(%d,%d) | pointer (%d,%d) diff (%d,%d)", id, shapes, xy[0], xy[1], bx0, by0, bx1, by1, cx, cy, cx - xy[0], cy - xy[1]);
+        lastLog[k] = GetTickCount();
+    }
+    lastX[k] = xy[0]; lastY[k] = xy[1];
+}
+static uintptr_t g_spr1Cont = 0x41305a + 6, g_spr2Cont = 0x4144e0 + 6;
+__declspec(naked) static void HookSprite1() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]    // view (args: view +4, shapes +8, id +12, x +16, y +20; +32 for pushad)
+        lea eax, [esp + 52]          // &x
+        push eax
+        push dword ptr [esp + 48]    // shapes
+        push dword ptr [esp + 56]    // id
+        call SpriteFilter
+        add esp, 16
+        popad
+        push ebp
+        mov ebp, esp
+        add esp, -0x50
+        jmp dword ptr [g_spr1Cont]
+    }
+}
+__declspec(naked) static void HookSprite2() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]    // view
+        lea eax, [esp + 52]          // &x
+        push eax
+        push dword ptr [esp + 48]    // shapes
+        push dword ptr [esp + 56]    // id
+        call SpriteFilter
+        add esp, 16
+        popad
+        push ebp
+        mov ebp, esp
+        add esp, -0x50
+        jmp dword ptr [g_spr2Cont]
+    }
+}
 
 // ---------------------------------------------------------------- hooks
 static LONGLONG g_passStart; static int g_passIdx = -1;
@@ -1331,6 +1405,7 @@ extern "C" void __cdecl PostEnd() {
         g_frames++;
         Smooth_SetGameThread();
         UpdateControlMode();
+        g_lastFlightTick = GetTickCount();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
         static bool prev[9];
@@ -1626,6 +1701,16 @@ static void InstallHooks() {
         VirtualProtect((void*)ADDR_ROLL_PATCH, 7, old, &old); FlushInstructionCache(GetCurrentProcess(), q, 7); g2 = true;
     }
     Log("hooks: controls joystick=%d roll=%d", g1, g2);
+    static const uint8_t sprPro[6] = {0x55, 0x8B, 0xEC, 0x83, 0xC4, 0xB0};   // push ebp; mov ebp,esp; add esp,-0x50
+    bool h1 = WriteJmp(0x41305a, (void*)HookSprite1, sprPro, 6), h2 = WriteJmp(0x4144e0, (void*)HookSprite2, sprPro, 6);
+    Log("hooks: sprites %d %d", h1, h2);
+    if (g_cursorFix) {   // PAD: background restore at pointer-1 (was +0x3b,+0x16), shadow at pointer+3 in the PAD view (was +3,+3)
+        struct { uintptr_t at; uint8_t was, now; } pp[] = {{0x4363c8, 0x3b, 0xff}, {0x4363da, 0x16, 0xff}, {0x436481, 0x03, 0xec}, {0x436491, 0x03, 0xc7}};
+        bool ok = true;
+        for (auto& q : pp) ok = ok && *(uint8_t*)(q.at - 2) == 0x83 && *(uint8_t*)(q.at - 1) == 0xc0 && *(uint8_t*)q.at == q.was;
+        if (ok) for (auto& q : pp) { DWORD old; VirtualProtect((void*)q.at, 1, PAGE_EXECUTE_READWRITE, &old); *(uint8_t*)q.at = q.now; VirtualProtect((void*)q.at, 1, old, &old); }
+        Log("hooks: PAD cursor fix %d", ok);
+    }
     for (uintptr_t slot : {(uintptr_t)0x570194, (uintptr_t)0x570198}) {   // joyGetNumDevs / joyGetPosEx import slots
         void* fn = *(void**)slot; HMODULE m = nullptr; char name[MAX_PATH] = "?";
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)fn, &m))
@@ -1670,13 +1755,18 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         GetPrivateProfileStringA("VR", "LASER_WIDEN", "3.0", b, 32, p); g_laserWiden = (float)atof(b);
         g_smooth = GetPrivateProfileIntA("VR", "SMOOTH", 1, p);
         g_ctlEnable = GetPrivateProfileIntA("VR", "VR_CONTROLS", 1, p) != 0;
+        g_spriteLog = GetPrivateProfileIntA("VR", "SPRITE_LOG", 0, p) != 0;
+        g_cursorFix = GetPrivateProfileIntA("VR", "CURSOR_FIX", 1, p) != 0;
+        g_cursorId = GetPrivateProfileIntA("VR", "PAD_CURSOR_ID", -1, p);
+        g_cursorDx = GetPrivateProfileIntA("VR", "PAD_CURSOR_DX", 0, p); g_cursorDy = GetPrivateProfileIntA("VR", "PAD_CURSOR_DY", 0, p);
         g_invertPitch = GetPrivateProfileIntA("VR", "INVERT_PITCH", 0, p) != 0;
         g_invertRoll = GetPrivateProfileIntA("VR", "INVERT_ROLL", 0, p) != 0;
         GetPrivateProfileStringA("VR", "ROLL_GAIN", "2.5", b, 32, p); g_rollGain = (float)atof(b);
         GetPrivateProfileStringA("VR", "THROTTLE_RATE", "0.6", b, 32, p); g_throttleRate = (float)atof(b);
-        {   static const char* keyNames[VB_COUNT] = {"KEY_FIRE_GUNS", "KEY_FIRE_MISSILE", "KEY_AFTERBURNER", "KEY_MATCH_SPEED",
-                "KEY_CYCLE_TARGET", "KEY_TARGET_HOSTILE", "KEY_CYCLE_WEAPON", "KEY_JUMP", "KEY_SPEED_ZERO"};
-            for (int i = 0; i < VB_COUNT; i++) g_keyFor[i] = (uint8_t)GetPrivateProfileIntA("VR", keyNames[i], g_keyFor[i], p); }
+        for (int i = 0; i < kVrCommandCount; i++) {   // KEY_<COMMAND>=scancode (decimal) overrides the game key
+            char k[64] = "KEY_"; for (int j = 0; kVrCommands[i].action[j] && j < 58; j++) k[4 + j] = (char)toupper(kVrCommands[i].action[j]);
+            g_keyFor[i] = (uint8_t)GetPrivateProfileIntA("VR", k, kVrCommands[i].scancode, p); g_altFor[i] = kVrCommands[i].alt;
+        }
         g_retDynamic = GetPrivateProfileIntA("VR", "RETICLE_DYNAMIC", 0, p) != 0;
         GetPrivateProfileStringA("VR", "OBSERVER_BACK", "1.0", b, 32, p); g_observerBack = (float)atof(b);
         g_showOwnShip = GetPrivateProfileIntA("VR", "SHOW_OWN_SHIP", 0, p) != 0;
