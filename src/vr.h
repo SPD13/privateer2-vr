@@ -36,6 +36,7 @@ struct VrControls {
     uint64_t buttons;             // bit per kVrCommands entry (held)
 };
 bool Vr_GetControls(VrControls* c);
+void Vr_Haptic(int hand, float amplitude, float seconds);   // hand 0 left, 1 right, 2 both; amplitude 0..1
 void Vr_SetReticleDistance(float metres);   // depth of what is under the crosshair (<= 0: use RETICLE_DIST)
 LONG Vr_FrameCounter();                    // increments whenever new predicted eye poses are available
 // One HUD marker (bracket, lead indicator, nav marker) found in the 640x480 marker image, with the distance of

@@ -44,7 +44,7 @@ The game's 2D HUD (radar, gauges, VDUs) is shown on a flat panel in front of you
 | Setting | Default | Effect |
 |---|---|---|
 | `RETICLE_GLASS` | `1` | Draw the gun crosshair on the HUD glass (the HUD panel plane) with `RETICLE_GLASS_ALPHA` opacity. Takes precedence over `RETICLE_IN_EYES`. |
-| `RETICLE_GLASS_ALPHA` | `0.5` | Crosshair opacity on the glass (0..1). |
+| `RETICLE_GLASS_ALPHA` | `0.7` | Crosshair opacity on the glass (0..1). |
 | `RETICLE_IN_EYES` | `1` | Used when `RETICLE_GLASS=0`. `1` = draw the crosshair into the 3D image at infinity, so nearer ships cover it. `0` = separate layer on top. |
 | `RETICLE_DIST` | `30` | Crosshair distance on the ship's boresight when it is not on the glass. `500` ≈ optical infinity, like a real HUD. `0` = keep it in the HUD panel. The template uses `500`. |
 | `RETICLE_MIN_DIST` | `1.5` | Closest the crosshair/marker plane may come. |
@@ -52,6 +52,48 @@ The game's 2D HUD (radar, gauges, VDUs) is shown on a flat panel in front of you
 | `RETICLE_SIZE` | `0.20` | Size of the crosshair region as a fraction of the HUD width. It must contain the whole crosshair cluster, including the pitch/yaw ladders. |
 
 The target bracket (octagon) and the lead indicator are always placed at the 3D position and depth of the targeted object. Direction arrows stay on the HUD plane. The markers are never clipped at the edge of the original screen.
+
+## HUD panels
+
+With `HUD_PANELS=1`, parts of the HUD are cut out of the flat HUD and shown as separate panels on a sphere around your head, like cockpit instruments. Every panel automatically faces you, so looking at any of them feels natural. Anything not covered by a panel (crosshair, messages, other pop-ups) stays on the flat HUD.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `HUD_PANELS` | `1` | `1` = show the panels below; `0` = one flat HUD, as before. |
+| `PANEL_RADIUS` | `0.8` | Radius of the sphere in metres, i.e. how far the panels are from your head. |
+| `PANEL_<NAME>` | see below | Defines one panel. `PANEL_<NAME>=0` removes it. |
+
+Each `PANEL_<NAME>` value is 7 (or 8) comma-separated numbers:
+
+```
+PANEL_TARGET=2,342,120,478, -44,-22, 0.28
+             └─ x0,y0,x1,y1 ─┘ └az,el┘ └width┘ [,radius]
+```
+
+| Part | Meaning |
+|---|---|
+| `x0,y0,x1,y1` | The rectangle of the original 640×480 HUD shown on this panel (top-left inclusive, bottom-right exclusive). Use a Ctrl+F9 HUD dump (`hud_*.bmp` in the game folder) to find coordinates. |
+| `az` | Azimuth in degrees: `0` = straight ahead, positive = to your right, negative = to your left. |
+| `el` | Elevation in degrees: `0` = eye level, positive = up, negative = down. |
+| `width` | Panel width in metres; the height follows the rectangle's aspect ratio. |
+| `radius` | Optional: this panel's own distance, overriding `PANEL_RADIUS`. |
+
+At 0.8 m, 0.1 m of width covers about 7° of view; keep neighbouring panels' azimuths far enough apart so they don't overlap.
+
+Default panels (names are fixed; at most 8 panels):
+
+| Panel | HUD content | Default value |
+|---|---|---|
+| `PANEL_VELOCITY` | Velocity readout and bars (top centre) | `236,4,406,58, 0,24, 0.36` |
+| `PANEL_COMMS` | Comms window (top left) | `0,0,234,200, -34,22, 0.40` |
+| `PANEL_TARGET` | Target VDU (bottom left) | `2,342,120,478, -44,-22, 0.28` |
+| `PANEL_TARGET_SHIELDS` | Target's shield/armour ring (left of the radar) | `138,382,254,476, -22,-26, 0.24` |
+| `PANEL_RADAR` | Radar and the bars below it | `254,346,388,478, 0,-28, 0.30` |
+| `PANEL_SHIELDS` | Your own ship's shield/armour ring (right of the radar) | `388,382,504,476, 22,-26, 0.24` |
+| `PANEL_RIGHT` | Right VDU area (bottom right) | `504,342,640,478, 44,-22, 0.28` |
+| `PANEL_MISSILES` | Missile / gun VDW window (top right) | `406,0,640,200, 34,22, 0.40` |
+
+A malformed value is ignored and reported in `p2vr.log` (`[vr] PANEL_... ignored`). Each panel is one OpenXR composition layer; if the runtime's layer limit (16 on SteamVR) is reached, target markers are dropped before panels.
 
 ## Space visuals
 
@@ -92,6 +134,16 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 | `ROLL_GAIN` | `2.5` | Roll rate multiplier. |
 | `THROTTLE_RATE` | `0.6` | Throttle change per second at full left-stick deflection (0..1 of max speed per second). The throttle follows the game's own setting until you move the stick. |
 | `KEY_<COMMAND>` | per command | Override the game key a command presses, as a DirectInput scancode in decimal. `<COMMAND>` is the action name in upper case, e.g. `KEY_FIRE_GUNS=57` (Space), `KEY_JUMP=36` (J). Commands flagged with Alt in `commands.h` keep their Alt modifier. |
+
+## Controller rumble
+
+| Setting | Default | Effect |
+|---|---|---|
+| `RUMBLE` | `1` | Controller vibration on/off. |
+| `RUMBLE_GUNS` | `0.35` | Strength (0..1) of the short right-hand pulse for each gun shot leaving your ship. `0` = none. |
+| `RUMBLE_HIT` | `0.9` | Strength (0..1) of the both-hands pulse when your ship takes damage (shields or armour drop); bigger hits rumble harder and longer. `0` = none. |
+
+The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so they can be reassigned in the SteamVR binding screen.
 
 ## Testing automation
 

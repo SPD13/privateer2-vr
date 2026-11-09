@@ -95,6 +95,7 @@ static uint8_t* volatile g_game;     // game state pointer captured from the sta
 static bool  g_dust = true, g_flare = true;
 static int   g_actorLog = 0;
 static float g_laserWiden = 3.0f, g_laserWidenDist = 60.0f;
+static bool  g_rumble = true; static float g_rumbleGuns = 0.35f, g_rumbleHit = 0.9f;   // controller vibration
 static bool  g_retDynamic = false;
 static bool  g_retInEyes = true;     // crosshair + lead indicator drawn into the 3D image at infinity (ships occlude them)
 static float g_retFracP2 = 0.20f;    // crosshair region (fraction of the HUD width), same as RETICLE_SIZE
@@ -491,7 +492,7 @@ static bool IsBoltModel(void* m) { for (int i = 0; i < g_nBoltModels; i++) if (g
 static void WidenShots() {
     g_nMoved = 0;
     uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
-    if (!game || !wfg || g_laserWiden == 1.0f) return;
+    if (!game || !wfg) return;
     uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
     if (!ship) return;
     const float* sm = (const float*)(ship + ACTOR_T_MAT);
@@ -509,8 +510,11 @@ static void WidenShots() {
             g_boltModels[g_nBoltModels++] = model;
             Log("[shots] learned shot model %p (spawned at %.2f %.2f %.2f)", model, v[0], v[1], v[2]);
         }
+        if (visible && !was && g_rumble && g_rumbleGuns > 0 && IsBoltModel(model) &&
+            fabsf(v[0]) < 4.f && fabsf(v[1]) < 3.f && v[2] < 0.5f && v[2] > -6.f)
+            Vr_Haptic(1, g_rumbleGuns, 0.04f);                      // our shot just left the guns: right hand
         was = visible;
-        if (!visible || !IsBoltModel(model) || g_nMoved >= 128) continue;
+        if (g_laserWiden == 1.0f || !visible || !IsBoltModel(model) || g_nMoved >= 128) continue;
         float ahead = -v[2];
         if (ahead <= 0.f || ahead >= g_laserWidenDist) continue;
         float f = 1.0f + (g_laserWiden - 1.0f) * (1.0f - ahead / g_laserWidenDist);
@@ -1284,7 +1288,27 @@ static void UpdateControlMode() {
     }
     g_prevButtons = front ? c.buttons : 0;
 }
-extern "C" void __cdecl ApplyStick() {}   // joystick path no longer used (kept as a no-op hook)
+extern "C" void __cdecl ApplyStick() {}
+
+// Rumble when the player's ship is hit: the HUD's shield/armour display reads four shield values (16.16 at entry+0x12dc,
+// stride 2 bytes, i.e. shorts at +0x12de..+0x12e4) and four armour values (shorts at +0x12e6..+0x12ec); maxima per ship
+// type at 0x4c6950 / 0x4c6954 (+type*0x48). A drop of their total between game frames is a hit.
+static void CheckHits() {
+    static int lastTotal = -1, lastPlayer = -1; static DWORD lastTick;
+    if (!g_rumble || g_rumbleHit <= 0 || !g_game || !Vr_Active()) { lastTotal = -1; return; }
+    int player = *(int*)(g_game + GAME_PLAYER);
+    const uint8_t* entry = g_game + player * SHIP_STRIDE;
+    int total = 0; for (int k = 0; k < 8; k++) total += *(const int16_t*)(entry + 0x12de + k * 2);
+    int type = *(const int*)(entry + 0x11e6) >> 16;
+    int maxTotal = 4 * (*(const int16_t*)(0x4c6950 + type * 0x48) + *(const int16_t*)(0x4c6954 + type * 0x48));
+    DWORD now = GetTickCount();
+    if (lastTotal >= 0 && player == lastPlayer && now - lastTick < 1000 && total < lastTotal && maxTotal > 0) {
+        float drop = (float)(lastTotal - total) / maxTotal;           // fraction of everything the ship has
+        float amp = g_rumbleHit * (0.45f + drop * 8.0f); if (amp > 1) amp = 1;
+        Vr_Haptic(2, amp, 0.12f + (drop > 0.05f ? 0.15f : 0.0f));
+    }
+    lastTotal = total; lastPlayer = player; lastTick = now;
+}   // joystick path no longer used (kept as a no-op hook)
 
 // ---------------------------------------------------------------- 2D sprite hook (menus / PAD)
 // Both sprite blitters (0x41305a, 0x4144e0; cdecl view, shapes, id, x, y) pass through SpriteFilter, which can move a
@@ -1405,6 +1429,7 @@ extern "C" void __cdecl PostEnd() {
         g_frames++;
         Smooth_SetGameThread();
         UpdateControlMode();
+        CheckHits();
         g_lastFlightTick = GetTickCount();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
@@ -1757,6 +1782,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_ctlEnable = GetPrivateProfileIntA("VR", "VR_CONTROLS", 1, p) != 0;
         g_spriteLog = GetPrivateProfileIntA("VR", "SPRITE_LOG", 0, p) != 0;
         g_cursorFix = GetPrivateProfileIntA("VR", "CURSOR_FIX", 1, p) != 0;
+        g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
+        GetPrivateProfileStringA("VR", "RUMBLE_GUNS", "0.35", b, 32, p); g_rumbleGuns = (float)atof(b);
+        GetPrivateProfileStringA("VR", "RUMBLE_HIT", "0.9", b, 32, p); g_rumbleHit = (float)atof(b);
         g_cursorId = GetPrivateProfileIntA("VR", "PAD_CURSOR_ID", -1, p);
         g_cursorDx = GetPrivateProfileIntA("VR", "PAD_CURSOR_DX", 0, p); g_cursorDy = GetPrivateProfileIntA("VR", "PAD_CURSOR_DY", 0, p);
         g_invertPitch = GetPrivateProfileIntA("VR", "INVERT_PITCH", 0, p) != 0;

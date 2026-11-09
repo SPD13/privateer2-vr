@@ -32,6 +32,12 @@ static XrActionSet s_actSet; static XrAction s_actStickR, s_actStickL, s_actRece
 // laser pointer for menus / films (outside flight): aim pose, left and right click
 static XrAction s_actAim, s_actClick, s_actRClick, s_actEsc; static XrSpace s_aimSpace;
 static bool s_frameExt;   // XR_VALVE_frame_controller_interaction enabled
+static XrAction s_actHaptic[2];                                     // vibration output, left / right hand
+static float s_hapAmp[2], s_hapDur[2]; static bool s_hapPending[2]; // requests from the game thread (under s_ctlCs)
+static int s_maxLayers = 16;                                        // runtime's composition layer limit
+// HUD panels: rectangles of the 640x480 HUD shown as separate quads placed around the player (HUD_PANELS=1)
+struct HudPanel { char name[16]; float r[4]; float pos[3]; float yaw, pitch, width; };
+static HudPanel s_panels[8]; static int s_nPanels; static bool s_panelsOn;
 static bool s_actionsReady; static CRITICAL_SECTION s_ctlCs; static VrControls s_ctl;
 static float s_deadzone = 0.15f;
 static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size
@@ -77,7 +83,7 @@ static std::vector<uint8_t> s_mk; static int s_mkW, s_mkH; static uint8_t s_mkPa
 static VrMarkerBlob s_blobs[MAX_BLOBS], s_shownBlobs[MAX_BLOBS]; static int s_nBlobs, s_nShownBlobs;
 static float s_observerBack = 0;
 static bool  s_retInEyes = true;
-static bool  s_retGlass = true; static float s_glassAlpha = 0.5f;   // crosshair on the HUD glass, semi-transparent     // crosshair/lead indicator are drawn into the eye images (no quad layers)
+static bool  s_retGlass = true; static float s_glassAlpha = 0.7f;   // crosshair on the HUD glass, semi-transparent     // crosshair/lead indicator are drawn into the eye images (no quad layers)
 static uint32_t s_mkSerial, s_shownSerial; static DWORD s_mkSubmitTick;                       // marker image serials (submitted / on screen)
 // exact poses: for the marker set on screen, and for a newly submitted (pending) set
 static float s_mPos[MAX_BLOBS][3], s_mSize[MAX_BLOBS][2]; static uint8_t s_mValid[MAX_BLOBS];
@@ -86,6 +92,16 @@ static HANDLE   s_screenHandle; static int s_screenW, s_screenH; static uint32_t
 
 // ---------------------------------------------------------------- public API (game thread side)
 bool Vr_Active() { return s_active != 0; }
+void Vr_Haptic(int hand, float amp, float sec) {
+    if (!s_actionsReady) return;
+    EnterCriticalSection(&s_ctlCs);
+    for (int h = 0; h < 2; h++) if (hand == 2 || hand == h) {
+        if (!s_hapPending[h] || amp > s_hapAmp[h]) s_hapAmp[h] = amp;
+        if (!s_hapPending[h] || sec > s_hapDur[h]) s_hapDur[h] = sec;
+        s_hapPending[h] = true;
+    }
+    LeaveCriticalSection(&s_ctlCs);
+}
 bool Vr_GetControls(VrControls* c) {
     EnterCriticalSection(&s_ctlCs); *c = s_ctl; LeaveCriticalSection(&s_ctlCs);
     return c->active;
@@ -166,7 +182,7 @@ static ID3D11Texture2D* mkTex; static ID3D11ShaderResourceView* mkSrv; static in
 static ID3D11Texture2D* mkPalTex; static ID3D11ShaderResourceView* mkPalSrv;
 static ID3D11Texture2D* idxTex[2]; static ID3D11ShaderResourceView* idxSrv[2];
 static ID3D11Texture2D* palTex; static ID3D11ShaderResourceView* palSrv;
-static ID3D11SamplerState* linSamp; static ID3D11Buffer* cbuf; static ID3D11Buffer* cbufEye[2];
+static ID3D11SamplerState* linSamp; static ID3D11Buffer* cbuf; static ID3D11Buffer* cbufEye[2]; static ID3D11Buffer* cbufPanels;
 static ID3D11Texture2D* occTex[2]; static ID3D11ShaderResourceView* occSrv[2]; static int occW[2], occH[2];
 static ID3D11Texture2D* scrTex; static ID3D11ShaderResourceView* scrSrv; static HANDLE scrOpened;
 static float s_uScale = 1.0f, s_uOff = 0.0f;   // crop of the (pillarboxed) p2den image to its 4:3 centre
@@ -183,6 +199,7 @@ V vs(uint id : SV_VertexID) {
     V o; o.uv = float2((id << 1) & 2, id & 2); o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1); return o;
 }
 Texture2D<uint>   occ : register(t3);
+cbuffer P : register(b2) { float4 prect[8]; float4 pinfo; };   // HUD panels cut out of the main HUD (uv rects), pinfo.x = count
 cbuffer E : register(b1) { float4 r0; float4 r1; float4 r2; float4 eye; float4 box; float4 grect; float4 crop; float4 flags; };
 float4 psIndex(V i) : SV_Target {
     uint c = idx.Load(int3(i.p.xy, 0));
@@ -212,6 +229,8 @@ float4 psMarker(V i) : SV_Target {   // map.xy = index texture size; index 0 = t
 }
 float4 psScreen(V i) : SV_Target {
     float2 uv = map.xy + i.uv * map.zw;
+    if (keyOn > 0.5) for (int k = 0; k < (int)pinfo.x; k++)
+        if (uv.x >= prect[k].x && uv.x < prect[k].z && uv.y >= prect[k].y && uv.y < prect[k].w) return 0;
     bool inHole = holeOn > 0.5 && uv.x > hole.x && uv.x < hole.z && uv.y > hole.y && uv.y < hole.w;
     if (inHole && holeAlpha <= 0.0) return 0;
     float3 c = scr.Sample(ls, float2(uOff + uv.x * uScale, uv.y)).rgb;
@@ -247,6 +266,8 @@ static bool CompileShaders() {
     d3d->CreateBuffer(&bd, nullptr, &cbuf);
     D3D11_BUFFER_DESC be = {128, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     d3d->CreateBuffer(&be, nullptr, &cbufEye[0]); d3d->CreateBuffer(&be, nullptr, &cbufEye[1]);
+    D3D11_BUFFER_DESC bp = {144, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    d3d->CreateBuffer(&bp, nullptr, &cbufPanels);
     D3D11_TEXTURE2D_DESC td = {256, 1, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
     d3d->CreateTexture2D(&td, nullptr, &palTex); d3d->CreateShaderResourceView(palTex, nullptr, &palSrv);
     d3d->CreateTexture2D(&td, nullptr, &mkPalTex); d3d->CreateShaderResourceView(mkPalTex, nullptr, &mkPalSrv);
@@ -277,7 +298,7 @@ static bool CreateDeviceForLuid(LUID luid) {
 static XrInstance inst; static XrSystemId sysId; static XrSession sess; static XrSpace localSpace, viewSpace;
 static XrSessionState sessState = XR_SESSION_STATE_UNKNOWN; static bool sessRunning;
 struct Swap { XrSwapchain sc; int w, h; std::vector<ID3D11RenderTargetView*> rtv; };
-static Swap eyeSc[2], quadSc, markSc;
+static Swap eyeSc[2], quadSc, markSc, panelSc; static bool havePanels;
 static bool haveMarkers;
 static int64_t scFormat;
 static XrFovf  usedFov;                   // symmetric fov submitted with the eye images
@@ -327,7 +348,9 @@ static void CreateActions() {
     ok = ok && MakeAction(&s_actAim, "pointer", "Menu pointer", XR_ACTION_TYPE_POSE_INPUT) &&
          MakeAction(&s_actClick, "menu_click", "Menu click", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
          MakeAction(&s_actRClick, "menu_right_click", "Menu right click (cycle hotspots)", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
-         MakeAction(&s_actEsc, "menu_escape", "Menu escape / skip film (Esc)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+         MakeAction(&s_actEsc, "menu_escape", "Menu escape / skip film (Esc)", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
+         MakeAction(&s_actHaptic[0], "rumble_left", "Rumble left hand", XR_ACTION_TYPE_VIBRATION_OUTPUT) &&
+         MakeAction(&s_actHaptic[1], "rumble_right", "Rumble right hand", XR_ACTION_TYPE_VIBRATION_OUTPUT);
     if (!ok) { Log("[ctl] xrCreateAction failed"); return; }
 
     struct B { XrAction a; const char* path; };
@@ -338,6 +361,7 @@ static void CreateActions() {
         sb.interactionProfile = P(profile); sb.suggestedBindings = v.data(); sb.countSuggestedBindings = (uint32_t)v.size();
         XrResult r = xrSuggestInteractionProfileBindings(inst, &sb);
         Log("[ctl] default bindings for %s: %s", profile, XR_SUCCEEDED(r) ? "ok" : "rejected");
+        return XR_SUCCEEDED(r);
     };
     for (int prof = 0; prof < 3; prof++) {
         if (prof == 2 && !s_frameExt) break;
@@ -350,8 +374,11 @@ static void CreateActions() {
             const char* path = prof == 0 ? kVrCommands[i].indexPath : prof == 1 ? kVrCommands[i].touchPath : kVrCommands[i].framePath;
             if (path) v.push_back({s_actBtn[i], path});
         }
-        suggest(prof == 0 ? "/interaction_profiles/valve/index_controller" : prof == 1 ? "/interaction_profiles/oculus/touch_controller"
-                                                                             : "/interaction_profiles/valve/frame_controller_valve", v.data(), (int)v.size());
+        const char* prName = prof == 0 ? "/interaction_profiles/valve/index_controller" : prof == 1 ? "/interaction_profiles/oculus/touch_controller"
+                                                                                     : "/interaction_profiles/valve/frame_controller_valve";
+        std::vector<B> withHaptics = v;
+        withHaptics.push_back({s_actHaptic[0], "/user/hand/left/output/haptic"}); withHaptics.push_back({s_actHaptic[1], "/user/hand/right/output/haptic"});
+        if (!suggest(prName, withHaptics.data(), (int)withHaptics.size())) suggest(prName, v.data(), (int)v.size());   // retry without rumble
     }
 
     XrSessionActionSetsAttachInfo ai = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO}; ai.countActionSets = 1; ai.actionSets = &s_actSet;
@@ -453,6 +480,19 @@ static bool BeamLayer(XrCompositionLayerQuad& q, const XrVector3f& head) {
     return true;
 }
 
+static void ApplyHaptics(bool focused) {
+    float amp[2], dur[2]; bool go[2];
+    EnterCriticalSection(&s_ctlCs);
+    for (int h = 0; h < 2; h++) { go[h] = s_hapPending[h]; amp[h] = s_hapAmp[h]; dur[h] = s_hapDur[h]; s_hapPending[h] = false; }
+    LeaveCriticalSection(&s_ctlCs);
+    if (!focused || !s_actionsReady) return;
+    for (int h = 0; h < 2; h++) if (go[h]) {
+        XrHapticVibration v = {XR_TYPE_HAPTIC_VIBRATION};
+        v.amplitude = amp[h] > 1 ? 1 : amp[h]; v.duration = (XrDuration)(dur[h] * 1e9); v.frequency = XR_FREQUENCY_UNSPECIFIED;
+        XrHapticActionInfo hi = {XR_TYPE_HAPTIC_ACTION_INFO}; hi.action = s_actHaptic[h];
+        xrApplyHapticFeedback(sess, &hi, (XrHapticBaseHeader*)&v);
+    }
+}
 static float Dead(float v) {   // deadzone with rescale, plus a gentle curve for fine aiming
     float a = fabsf(v); if (a < s_deadzone) return 0;
     a = (a - s_deadzone) / (1 - s_deadzone); a = a * a * 0.5f + a * 0.5f;
@@ -514,7 +554,8 @@ static bool InitXr() {
     XrSystemGetInfo sgi = {XR_TYPE_SYSTEM_GET_INFO}; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XRCHECK(xrGetSystem(inst, &sgi, &sysId));
     XrSystemProperties sp = {XR_TYPE_SYSTEM_PROPERTIES}; xrGetSystemProperties(inst, sysId, &sp);
-    Log("[vr] system: %s", sp.systemName);
+    s_maxLayers = (int)sp.graphicsProperties.maxLayerCount; if (s_maxLayers < 4) s_maxLayers = 4;
+    Log("[vr] system: %s (max %d layers)", sp.systemName, s_maxLayers);
 
     PFN_xrGetD3D11GraphicsRequirementsKHR getReq = nullptr;
     XRCHECK(xrGetInstanceProcAddr(inst, "xrGetD3D11GraphicsRequirementsKHR", (PFN_xrVoidFunction*)&getReq));
@@ -588,6 +629,7 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     s_retPx = (int)(s_retFrac * HUD_PX_W + 0.5f); if (s_retPx < 16) s_retPx = 16; if (s_retPx > HUD_PX_H) s_retPx = HUD_PX_H;
     if (!MakeSwap(quadSc, HUD_PX_W + s_retPx, HUD_PX_H)) return false;   // [ HUD | crosshair crop ]
     if (!MakeSwap(markSc, 3840, 960)) return false;
+    if (s_panelsOn && !MakeSwap(panelSc, HUD_PX_W, HUD_PX_H)) s_panelsOn = false;
     if (MakeSwap(beamSc, 8, 64)) {   // beam colour (premultiplied, semi-transparent cyan)
         uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         if (XR_SUCCEEDED(xrAcquireSwapchainImage(beamSc.sc, &ai, &i))) {
@@ -633,6 +675,12 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
     ctx->VSSetShader(vsFull, nullptr, 0); ctx->PSSetShader(psScreen, nullptr, 0);
     ID3D11ShaderResourceView* srvs[3] = {nullptr, nullptr, src};
     ctx->PSSetShaderResources(0, 3, srvs); ctx->PSSetSamplers(0, 1, &linSamp); ctx->PSSetConstantBuffers(0, 1, &cbuf);
+    float pcb[36] = {};   // panel rectangles (uv) cut out of the main HUD in flight
+    bool panels = flight && s_panelsOn;
+    if (panels) { for (int k = 0; k < s_nPanels; k++) { pcb[k*4] = s_panels[k].r[0] / 640.f; pcb[k*4+1] = s_panels[k].r[1] / 480.f;
+                                                          pcb[k*4+2] = s_panels[k].r[2] / 640.f; pcb[k*4+3] = s_panels[k].r[3] / 480.f; }
+                  pcb[32] = (float)s_nPanels; }
+    ctx->UpdateSubresource(cbufPanels, 0, nullptr, pcb, 0, 0); ctx->PSSetConstantBuffers(2, 1, &cbufPanels);
     float hw = s_retPx / (2.0f * HUD_PX_W), hh = s_retPx / (2.0f * HUD_PX_H);   // crosshair region half-size in HUD uv
     // pass 1: whole HUD (hole over the crosshair region in flight)
     bool split = flight && s_retDist > 0 && !s_retGlass;   // separate crosshair layer (crop pass)
@@ -647,8 +695,23 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
         ctx->UpdateSubresource(cbuf, 0, nullptr, cb2, 0, 0);
         D3D11_VIEWPORT vp2 = {(float)HUD_PX_W, 0, (float)s_retPx, (float)s_retPx, 0, 1}; ctx->RSSetViewports(1, &vp2); ctx->Draw(3, 0);
     }
-    ID3D11ShaderResourceView* nulls[3] = {}; ctx->PSSetShaderResources(0, 3, nulls);
     XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO}; xrReleaseSwapchainImage(s.sc, &ri);
+    if (panels) {   // the whole keyed HUD (no cut-outs) for the panel quads to take their rectangles from
+        uint32_t j = 0;
+        if (XR_SUCCEEDED(xrAcquireSwapchainImage(panelSc.sc, &ai, &j))) {
+            xrWaitSwapchainImage(panelSc.sc, &wi);
+            ctx->ClearRenderTargetView(panelSc.rtv[j], clear);
+            ctx->OMSetRenderTargets(1, &panelSc.rtv[j], nullptr);
+            float zero[36] = {}; ctx->UpdateSubresource(cbufPanels, 0, nullptr, zero, 0, 0);
+            float cbp[16] = {s_keyGain, 1.f, s_uScale, s_uOff, s_keyThresh, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0};
+            ctx->UpdateSubresource(cbuf, 0, nullptr, cbp, 0, 0);
+            D3D11_VIEWPORT vp3 = {0, 0, (float)HUD_PX_W, (float)HUD_PX_H, 0, 1}; ctx->RSSetViewports(1, &vp3); ctx->Draw(3, 0);
+            xrReleaseSwapchainImage(panelSc.sc, &ri);
+            havePanels = true;
+        }
+    }
+    ID3D11ShaderResourceView* nulls[3] = {}; ctx->PSSetShaderResources(0, 3, nulls);
+    ID3D11Buffer* nullCb = nullptr; ctx->PSSetConstantBuffers(2, 1, &nullCb);
 }
 
 static void UpdateMarkers() {
@@ -831,6 +894,7 @@ static void FrameLoop() {
         XrFrameBeginInfo fbi = {XR_TYPE_FRAME_BEGIN_INFO}; xrBeginFrame(sess, &fbi);
         if (InterlockedExchange(&s_recenter, 0)) DoRecenter(fs.predictedDisplayTime);
         PollControls(sessState == XR_SESSION_STATE_FOCUSED);
+        ApplyHaptics(sessState == XR_SESSION_STATE_FOCUSED);
 
         XrViewLocateInfo vli = {XR_TYPE_VIEW_LOCATE_INFO};
         vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = fs.predictedDisplayTime; vli.space = localSpace;
@@ -871,7 +935,7 @@ static void FrameLoop() {
         XrCompositionLayerQuad tip = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         if (targetDone && sessState == XR_SESSION_STATE_FOCUSED) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
         else s_ptrHit = false;
-        XrCompositionLayerQuad marks[MAX_BLOBS];
+        XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[8];
         if (fs.shouldRender && targetDone) {
             if (flight) { UploadEyes(); UpdateMarkers(); }
             UpdateScreen(flight);
@@ -894,7 +958,9 @@ static void FrameLoop() {
                     LeaveCriticalSection(&s_cs);
                     const float K = 461.0357f, sc = (float)markSc.w / (s_mkW ? s_mkW : 640);
                     float inf = s_retDist > 0 ? s_retDist : 500.0f;
+                    int budget = s_maxLayers - 3 - (s_panelsOn ? s_nPanels : 0);   // projection, HUD, crosshair, panels
                     for (int b = 0; b < s_nShownBlobs; b++) {
+                        if ((int)layers.size() - 1 >= budget) break;
                         const VrMarkerBlob& bl = s_shownBlobs[b];
                         int ox = bl.layer * 640;                                           // which third of the texture
                         int x0 = (int)((bl.x0 + ox) * sc) - 2, y0 = (int)(bl.y0 * sc) - 2, x1 = (int)((bl.x1 + 1 + ox) * sc) + 2, y1 = (int)((bl.y1 + 1) * sc) + 2;
@@ -937,6 +1003,22 @@ static void FrameLoop() {
                 quad.pose = {{0, 0, 0, 1}, {0, flight ? s_hudY : 0.0f, -(flight ? s_hudDist : s_screenDist)}};
                 if (flight) quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 layers.push_back((XrCompositionLayerBaseHeader*)&quad);
+                if (flight && s_panelsOn && havePanels) {
+                    const float px = (float)HUD_PX_W / 640.f;
+                    for (int k = 0; k < s_nPanels; k++) {
+                        const HudPanel& hp = s_panels[k]; XrCompositionLayerQuad& q = pq[k]; q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+                        int x0 = (int)(hp.r[0] * px), y0 = (int)(hp.r[1] * px), x1 = (int)(hp.r[2] * px), y1 = (int)(hp.r[3] * px);
+                        q.space = localSpace; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                        q.subImage.swapchain = panelSc.sc; q.subImage.imageRect = {{x0, y0}, {x1 - x0, y1 - y0}};
+                        q.size = {hp.width, hp.width * (hp.r[3] - hp.r[1]) / (hp.r[2] - hp.r[0])};
+                        // yaw about Y (+ = face turned right), then tilt about X (+ = face turned up)
+                        float a = hp.yaw * 0.0087266f, b = -hp.pitch * 0.0087266f;
+                        float sy = sinf(a), cy = cosf(a), sx = sinf(b), cx = cosf(b);
+                        q.pose = {{cy * sx, sy * cx, -sy * sx, cy * cx}, {hp.pos[0], hp.pos[1], hp.pos[2]}};
+                        q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                        layers.push_back((XrCompositionLayerBaseHeader*)&q);
+                    }
+                }
                 if (flight && s_retDist > 0 && !s_retInEyes && !s_retGlass) {   // crosshair on the boresight, same apparent size as on the HUD panel
                     reticle.space = localSpace; reticle.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                     reticle.subImage.swapchain = quadSc.sc; reticle.subImage.imageRect = {{HUD_PX_W, 0}, {s_retPx, s_retPx}};
@@ -993,9 +1075,37 @@ void Vr_Start(const char* ini, LogFn log) {
     s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 0.0f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
     if (s_hudWidth <= 0) s_hudWidth = 2 * s_hudDist * GAME_TAN_H;   // auto: exactly the game's field of view
     s_retInEyes = IniF(ini, "RETICLE_IN_EYES", 1.0f) != 0;
-    s_retGlass = IniF(ini, "RETICLE_GLASS", 1.0f) != 0; s_glassAlpha = IniF(ini, "RETICLE_GLASS_ALPHA", 0.5f);
+    s_retGlass = IniF(ini, "RETICLE_GLASS", 1.0f) != 0; s_glassAlpha = IniF(ini, "RETICLE_GLASS_ALPHA", 0.7f);
     s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retMin = IniF(ini, "RETICLE_MIN_DIST", 1.5f); s_retNow = s_retDist; s_retFrac = IniF(ini, "RETICLE_SIZE", 0.20f);
     s_screenDist = IniF(ini, "SCREEN_DIST", 2.5f); s_screenWidth = IniF(ini, "SCREEN_WIDTH", 3.2f);
     s_keyGain = IniF(ini, "HUD_KEY_GAIN", 40.0f); s_keyThresh = IniF(ini, "HUD_KEY_THRESHOLD", 0.03f);
+    // HUD panels on a sphere around the seated head. PANEL_<NAME> = x0,y0,x1,y1 (HUD pixels, 640x480), azimuth (deg, + right),
+    // elevation (deg, + up), width (m) [, radius (m)]. Each panel faces the centre of the sphere.
+    s_panelsOn = IniF(ini, "HUD_PANELS", 1.0f) != 0;
+    float radius = IniF(ini, "PANEL_RADIUS", 0.8f);
+    static const char* kPanelDefaults[][2] = {
+        {"VELOCITY",       "236,4,406,58,     0, 24, 0.36"},
+        {"COMMS",          "0,0,234,200,    -34, 22, 0.40"},
+        {"TARGET",         "2,342,120,478,  -44,-22, 0.28"},
+        {"TARGET_SHIELDS", "138,382,254,476,-22,-26, 0.24"},
+        {"RADAR",          "254,346,388,478,  0,-28, 0.30"},
+        {"SHIELDS",        "388,382,504,476, 22,-26, 0.24"},
+        {"RIGHT",          "504,342,640,478, 44,-22, 0.28"},
+        {"MISSILES",       "406,0,640,200,   34, 22, 0.40"}};   // top right: missile / gun VDWs (max 8 panels)
+    s_nPanels = 0;
+    for (auto& d : kPanelDefaults) {
+        char key[32], b[160]; sprintf_s(key, "PANEL_%s", d[0]);
+        GetPrivateProfileStringA("VR", key, d[1], b, sizeof b, ini);
+        HudPanel hp = {}; strcpy_s(hp.name, d[0]);
+        float az = 0, el = 0, r = radius;
+        int n = sscanf_s(b, "%f , %f , %f , %f , %f , %f , %f , %f", &hp.r[0], &hp.r[1], &hp.r[2], &hp.r[3], &az, &el, &hp.width, &r);
+        if (n < 7) { if (strcmp(b, "0") && *b) Log("[vr] %s ignored (need 7 or 8 numbers): %s", key, b); continue; }
+        if (hp.r[2] <= hp.r[0] || hp.r[3] <= hp.r[1] || hp.width <= 0 || r <= 0 || s_nPanels >= 8) { Log("[vr] %s ignored (bad rectangle/width/radius)", key); continue; }
+        float ra = az * 0.0174533f, re = el * 0.0174533f;
+        hp.pos[0] = r * sinf(ra) * cosf(re); hp.pos[1] = r * sinf(re); hp.pos[2] = -r * cosf(ra) * cosf(re);
+        hp.yaw = -az; hp.pitch = -el;                                  // face the centre
+        s_panels[s_nPanels++] = hp;
+    }
+    Log("[vr] HUD panels %s (%d)", s_panelsOn ? "on" : "off", s_nPanels);
     CreateThread(nullptr, 0, VrThread, nullptr, 0, nullptr);
 }
