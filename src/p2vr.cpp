@@ -641,7 +641,41 @@ extern "C" void __cdecl RecordSprite(int id, int x, int y) {
     const uint8_t* e = (const uint8_t*)sh + sh[id * 2 + 2];
     g_pips[g_nPips++] = {*(const int32_t*)(e + 8) + x, *(const int32_t*)(e + 12) + y, *(const int32_t*)(e + 16) + x, *(const int32_t*)(e + 20) + y};
 }
-extern "C" void __cdecl PreMarkers() { g_nPips = 0; }
+// Every marker line goes through FUN_004661a0 (eax view, edx x0, ebx y0, ecx x1, stack: y1, colour, ...), which clips
+// to the game's view. Lines of the missile-lock reticle (drawn from FUN_00453580) are recorded here unclipped and
+// redrawn by p2vr around the target, so the reticle is complete even where it reaches outside the game's view.
+struct MkLine { int x0, y0, x1, y1, colour; };
+static MkLine g_lockLines[128]; static int g_nLockLines; static bool g_recLines;
+struct PushadFrame { uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax, ret, y1, colour; };
+extern "C" void __cdecl RecordLine(PushadFrame* f) {
+    if (!g_recLines || f->ret < 0x453580 || f->ret >= 0x453b00 || g_nLockLines >= 128) return;
+    g_lockLines[g_nLockLines++] = {(int)f->edx, (int)f->ebx, (int)f->ecx, (int)f->y1, (int)(f->colour & 0xff)};
+}
+static uintptr_t g_lineCont = 0x4661a0 + 7;
+__declspec(naked) static void HookLine() {
+    __asm {
+        pushad
+        push esp
+        call RecordLine
+        add esp, 4
+        popad
+        push esi
+        push edi
+        push ebp
+        mov esi, dword ptr [esp + 0x20]
+        jmp dword ptr [g_lineCont]
+    }
+}
+static void DrawLine(uint8_t* img, int w, int h, int x0, int y0, int x1, int y1, uint8_t c, int brush) {
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1, err = dx + dy;
+    for (int n = 0; n < 4096; n++) {
+        for (int by = -brush; by <= brush; by++) for (int bx = -brush; bx <= brush; bx++) {
+            int x = x0 + bx, y = y0 + by; if (x >= 0 && y >= 0 && x < w && y < h) img[(size_t)y * w + x] = c; }
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err; if (e2 >= dy) { err += dy; x0 += sx; } if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+extern "C" void __cdecl PreMarkers() { g_nPips = 0; g_nLockLines = 0; g_recLines = true; }
 
 // low-res depth pass through the game camera (see HudFovDepth)
 static std::vector<uint8_t> g_dpC, g_dpD; static float g_dpHither = 1, g_dpYon = 1024; static bool g_dpValid;
@@ -692,6 +726,7 @@ static uint8_t* CameraRef() {   // the actor the game's foreground camera is att
     return g_game ? *(uint8_t**)(g_game + GAME_SHIPS + *(int*)(g_game + GAME_SHIPIDX) * SHIP_STRIDE) : nullptr;
 }
 static uint8_t* g_targetActor;   // the game's current target object
+static const int ARROW_COLOUR = 0x4f;   // direction arrows / nav bracket lines (FUN_004661a0 calls in 0x453b00); shaded with the 0x40..0x4f ramp
 static void AssignMarkerDepths(VrMarkerBlob* b, int n, MarkerLink* link) {
     uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
     if (!game || !wfg || !n) return;
@@ -772,10 +807,26 @@ extern "C" void __cdecl PostMarkers() {
         for (int y = r.y0; y <= r.y1; y++) for (int x = r.x0; x <= r.x1; x++) { size_t k = (size_t)y * w + x; if (mk[k]) { pip[k] = mk[k]; mk[k] = 0; } }
         blobs[nb++] = {r.x0, r.y0, r.x1, r.y1, -1.0f, 1};
     }
+    g_recLines = false;
+    bool ownLock = g_nLockLines > 0 && w == 640 && h == 480;
+    if (ownLock) for (int i = 0; i < g_nLockLines; i++) { const MkLine& l = g_lockLines[i]; DrawLine(mk.data(), w, h, l.x0, l.y0, l.x1, l.y1, 0, 1); }
+    // Direction arrows / nav bracket (orange ramp 0x40..0x4f) are separated before the blob search, so an arrow lying on
+    // a ship's bracket can never merge with it: their pixels go to the lead-indicator layer and they stay on the HUD glass.
+    static std::vector<uint8_t> arrowImg; arrowImg.assign((size_t)w * h, 0); bool anyArrow = false;
+    for (size_t k = 0; k < (size_t)w * h; k++) if ((mk[k] >> 4) == (ARROW_COLOUR >> 4)) { arrowImg[k] = mk[k]; mk[k] = 0; anyArrow = true; }
     int nm = FindMarkerBlobs(mk.data(), w, h, blobs + nb, 10 - nb);
     nb += nm;
     MarkerLink links[10] = {};
     AssignMarkerDepths(blobs, nb, links);   // target sprite + other markers: placed at the object they are drawn on
+    if (anyArrow && nb < 8) {
+        int na = FindMarkerBlobs(arrowImg.data(), w, h, blobs + nb, 8 - nb);
+        for (int i = nb; i < nb + na; i++) {
+            blobs[i].layer = 1; blobs[i].depthM = -2.0f; links[i] = {};
+            for (int y = blobs[i].y0; y <= blobs[i].y1; y++) for (int x = blobs[i].x0; x <= blobs[i].x1; x++) {
+                size_t k = (size_t)y * w + x; if (arrowImg[k] && !pip[k]) pip[k] = arrowImg[k]; }
+        }
+        nb += na;
+    }
     // Target octagon: always shown from a stored copy of the last *complete* octagon the game drew, with a fixed
     // physical size around the target (measured when complete, smoothed) -> no clipping at the game's view edges,
     // and smooth growth while closing in (the game only resizes it at 30 Hz).
@@ -790,10 +841,19 @@ extern "C" void __cdecl PostMarkers() {
         int best = 0; for (int c = 1; c < 256; c++) if (cnt[c] > cnt[best] || best == 0) best = cnt[c] ? c : best;
         return best;
     };
+    // Direction arrows (and the nav-point bracket) are drawn by the game in line colour 0x4f around the screen centre:
+    // they never belong to an object, so they always stay on the crosshair plane even when they lie over a target.
+    bool arrow[10] = {};
+    for (int i = 0; i < nb; i++) if (blobs[i].layer == 0 && (dominant(blobs[i]) >> 4) == (ARROW_COLOUR >> 4)) { arrow[i] = true; links[i] = {}; }
+    {   static DWORD lastLog;   // diagnostic: marker pieces with their colour
+        if (GetTickCount() - lastLog > 3000 && nb) { lastLog = GetTickCount(); char line[512]; int o = 0;
+            for (int i = 0; i < nb && o < 440; i++) o += sprintf_s(line + o, sizeof line - o, " [L%d (%d,%d)-(%d,%d) c%02x%s%s]", blobs[i].layer, blobs[i].x0, blobs[i].y0,
+                blobs[i].x1, blobs[i].y1, blobs[i].layer == 0 ? dominant(blobs[i]) : 0, arrow[i] ? " arrow" : "", links[i].actor ? " linked" : "");
+            Log("[markers]%s", line); } }
     static int knownOctColour = -1;                            // learned from the first complete octagon
     int oct = -1;
     for (int i = 0; i < nb; i++)
-        if (blobs[i].layer == 0 && links[i].actor && links[i].actor == g_targetActor && blobs[i].x1 - blobs[i].x0 >= 20 && blobs[i].y1 - blobs[i].y0 >= 20) {
+        if (blobs[i].layer == 0 && !arrow[i] && links[i].actor && links[i].actor == g_targetActor && blobs[i].x1 - blobs[i].x0 >= 20 && blobs[i].y1 - blobs[i].y0 >= 20) {
             if (oct < 0) oct = i;
             else if (knownOctColour >= 0 && dominant(blobs[i]) == knownOctColour && dominant(blobs[oct]) != knownOctColour) oct = i;
         }
@@ -803,13 +863,13 @@ extern "C" void __cdecl PostMarkers() {
         while (grew) {
             grew = false;
             for (int i = 0; i < nb; i++) {
-                if (i == oct || blobs[i].layer != 0) continue;
+                if (i == oct || blobs[i].layer != 0 || arrow[i]) continue;
                 const int m = 20;
                 bool isNear = blobs[i].x1 >= blobs[oct].x0 - m && blobs[i].x0 <= blobs[oct].x1 + m && blobs[i].y1 >= blobs[oct].y0 - m && blobs[i].y0 <= blobs[oct].y1 + m;
                 if (!isNear || dominant(blobs[i]) != octColour) continue;
                 if (blobs[i].x0 < blobs[oct].x0) blobs[oct].x0 = blobs[i].x0; if (blobs[i].y0 < blobs[oct].y0) blobs[oct].y0 = blobs[i].y0;
                 if (blobs[i].x1 > blobs[oct].x1) blobs[oct].x1 = blobs[i].x1; if (blobs[i].y1 > blobs[oct].y1) blobs[oct].y1 = blobs[i].y1;
-                for (int k = i; k < nb - 1; k++) { blobs[k] = blobs[k + 1]; links[k] = links[k + 1]; }
+                for (int k = i; k < nb - 1; k++) { blobs[k] = blobs[k + 1]; links[k] = links[k + 1]; arrow[k] = arrow[k + 1]; }
                 nb--; if (oct > i) oct--; grew = true; break;
             }
         }
@@ -858,7 +918,7 @@ extern "C" void __cdecl PostMarkers() {
                 lockActive ? "selected" : "none", *(float*)(g_game + 0x279f0)); }
     }
     for (int i = 0; i < nb; i++) {
-        if (i == oct || blobs[i].layer != 0 || tz <= 0 || !g_targetActor) continue;
+        if (i == oct || blobs[i].layer != 0 || arrow[i] || tz <= 0 || !g_targetActor) continue;
         float cx = (blobs[i].x0 + blobs[i].x1) * 0.5f, cy = (blobs[i].y0 + blobs[i].y1) * 0.5f;
         bool mine = links[i].actor == g_targetActor;
         // lock reticle pieces far from the target while converging: attach them to the target too (not the HUD glass)
@@ -869,22 +929,40 @@ extern "C" void __cdecl PostMarkers() {
         links[i].offX = cx - gx; links[i].offY = cy - gy; links[i].keepOffset = true;   // animation around the target kept
         blobs[i].depthM = tz / g_worldScale;
     }
+    // missile-lock reticle redrawn from its recorded lines into a 640x480 canvas centred on the game's target point
+    static std::vector<uint8_t> lockImg; lockImg.assign((size_t)640 * 480, 0);
+    if (ownLock && g_targetActor && tz > 0 && nb < 9) {
+        int bx0 = 640, by0 = 480, bx1 = -1, by1 = -1, ox = 320 - (int)gx, oy = 240 - (int)gy;
+        for (int i = 0; i < g_nLockLines; i++) {
+            const MkLine& l = g_lockLines[i];
+            DrawLine(lockImg.data(), 640, 480, l.x0 + ox, l.y0 + oy, l.x1 + ox, l.y1 + oy, (uint8_t)l.colour, 0);
+            int xs[2] = {l.x0 + ox, l.x1 + ox}, ys[2] = {l.y0 + oy, l.y1 + oy};
+            for (int k = 0; k < 2; k++) { if (xs[k] < bx0) bx0 = xs[k]; if (xs[k] > bx1) bx1 = xs[k]; if (ys[k] < by0) by0 = ys[k]; if (ys[k] > by1) by1 = ys[k]; }
+        }
+        if (bx0 < 0) bx0 = 0; if (by0 < 0) by0 = 0; if (bx1 > 639) bx1 = 639; if (by1 > 479) by1 = 479;
+        if (bx1 >= bx0 && by1 >= by0) {
+            MarkerLink l = {}; l.actor = g_targetActor; l.w = (float)(bx1 - bx0 + 1); l.h = (float)(by1 - by0 + 1);
+            l.offX = (bx0 + bx1) * 0.5f - 320.f; l.offY = (by0 + by1) * 0.5f - 240.f; l.keepOffset = true;
+            blobs[nb] = {bx0, by0, bx1, by1, tz / g_worldScale, 3}; links[nb] = l; arrow[nb] = false; nb++;
+        }
+    }
     bool useCache = g_targetActor && !octCache.empty() && octWorldW > 0;
     if (useCache) {
-        if (oct >= 0) { for (int i = oct; i < nb - 1; i++) { blobs[i] = blobs[i + 1]; links[i] = links[i + 1]; } nb--; }   // replace the game's
+        if (oct >= 0) { for (int i = oct; i < nb - 1; i++) { blobs[i] = blobs[i + 1]; links[i] = links[i + 1]; arrow[i] = arrow[i + 1]; } nb--; }   // replace the game's
         if (nb < 10) {
             VrMarkerBlob bb = {0, 0, octW - 1, octH - 1, -1.0f, 2};
             MarkerLink l = {}; l.actor = g_targetActor; l.w = (float)octW; l.h = (float)octH; l.worldW = octWorldW; l.worldH = octWorldH;
             blobs[nb] = bb; links[nb] = l; nb++;
         }
     } else if (!g_targetActor) { octCache.clear(); octWorldW = octWorldH = 0; }
-    both.assign((size_t)w * 3 * h, 0);                        // [ markers | lead indicator | cached octagon ]
-    for (int y = 0; y < h; y++) { memcpy(&both[(size_t)y * w * 3], &mk[(size_t)y * w], w); memcpy(&both[(size_t)y * w * 3 + w], &pip[(size_t)y * w], w); }
-    if (useCache) for (int y = 0; y < octH && y < h; y++) memcpy(&both[(size_t)y * w * 3 + 2 * w], &octCache[(size_t)y * octW], octW < w ? octW : w);
+    both.assign((size_t)w * 4 * h, 0);                        // [ markers | lead indicator | cached octagon | lock reticle ]
+    for (int y = 0; y < h; y++) { memcpy(&both[(size_t)y * w * 4], &mk[(size_t)y * w], w); memcpy(&both[(size_t)y * w * 4 + w], &pip[(size_t)y * w], w); }
+    if (useCache) for (int y = 0; y < octH && y < h; y++) memcpy(&both[(size_t)y * w * 4 + 2 * w], &octCache[(size_t)y * octW], octW < w ? octW : w);
+    if (w == 640 && h == 480) for (int y = 0; y < h; y++) memcpy(&both[(size_t)y * w * 4 + 3 * w], &lockImg[(size_t)y * 640], 640);
     uint8_t pal[1024]; GetPalRGBX(pal);
     memcpy(g_mkLink, links, sizeof links); g_nMkLink = nb;
     for (int i = 0; i < nb; i++) if (blobs[i].layer == 0 && !links[i].actor) blobs[i].depthM = -2.0f;   // HUD glass
-    g_mkSerial = Vr_SubmitMarkers(both.data(), w * 3, h, pal, blobs, nb);
+    g_mkSerial = Vr_SubmitMarkers(both.data(), w * 4, h, pal, blobs, nb);
     // exact 3D poses for this marker set right away, in the same (smoothed) state as the eye images on screen,
     // so the headset never shows the game's 30 Hz placement in between (that caused a jumping/double marker)
     g_posesWithEyes = false; ApplyBlend(BlendFactor()); UpdateMarkerPoses(); RestoreBlend(); g_posesWithEyes = true;
@@ -925,7 +1003,7 @@ extern "C" void __cdecl PostMarkers() {
         }
     }
     g_pipCopy = pip; g_nPipCopy = 0;                          // lead indicator source for the eye images
-    for (int i = 0; i < nb; i++) if (blobs[i].layer == 1 && g_nPipCopy < 8) g_pipCopyRects[g_nPipCopy++] = {blobs[i].x0, blobs[i].y0, blobs[i].x1, blobs[i].y1};
+    for (int i = 0; i < nb; i++) if (blobs[i].layer == 1 && blobs[i].depthM != -2.0f && g_nPipCopy < 8) g_pipCopyRects[g_nPipCopy++] = {blobs[i].x0, blobs[i].y0, blobs[i].x1, blobs[i].y1};
     for (size_t i = 0; i < mk.size(); i++) if (pip[i]) mk[i] = pip[i];      // mirror below gets everything
     static int lastNb = -1; if (nb != lastNb) { lastNb = nb; char t[256]; int o = sprintf_s(t, "[markers] %d:", nb);
         for (int i = 0; i < nb && o < 230; i++) o += sprintf_s(t + o, sizeof t - o, " (%s%d,%d %.1fm)", blobs[i].layer ? "target " : "", (blobs[i].x0 + blobs[i].x1) / 2, (blobs[i].y0 + blobs[i].y1) / 2, blobs[i].depthM);
@@ -1753,6 +1831,8 @@ static void InstallHooks() {
     static const uint8_t sprPro[6] = {0x55, 0x8B, 0xEC, 0x83, 0xC4, 0xB0};   // push ebp; mov ebp,esp; add esp,-0x50
     bool h1 = WriteJmp(0x41305a, (void*)HookSprite1, sprPro, 6), h2 = WriteJmp(0x4144e0, (void*)HookSprite2, sprPro, 6);
     Log("hooks: sprites %d %d", h1, h2);
+    static const uint8_t linePro[7] = {0x56, 0x57, 0x55, 0x8B, 0x74, 0x24, 0x20};   // push esi; push edi; push ebp; mov esi,[esp+0x20]
+    Log("hooks: marker lines %d", WriteJmp(0x4661a0, (void*)HookLine, linePro, 7));
     if (g_cursorFix) {   // PAD: background restore at pointer-1 (was +0x3b,+0x16), shadow at pointer+3 in the PAD view (was +3,+3)
         struct { uintptr_t at; uint8_t was, now; } pp[] = {{0x4363c8, 0x3b, 0xff}, {0x4363da, 0x16, 0xff}, {0x436481, 0x03, 0xec}, {0x436491, 0x03, 0xc7}};
         bool ok = true;

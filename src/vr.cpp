@@ -628,7 +628,7 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     }
     s_retPx = (int)(s_retFrac * HUD_PX_W + 0.5f); if (s_retPx < 16) s_retPx = 16; if (s_retPx > HUD_PX_H) s_retPx = HUD_PX_H;
     if (!MakeSwap(quadSc, HUD_PX_W + s_retPx, HUD_PX_H)) return false;   // [ HUD | crosshair crop ]
-    if (!MakeSwap(markSc, 3840, 960)) return false;
+    if (!MakeSwap(markSc, 5120, 960)) return false;   // 4 x 640x480 at 2x: markers | lead | octagon | lock reticle
     if (s_panelsOn && !MakeSwap(panelSc, HUD_PX_W, HUD_PX_H)) s_panelsOn = false;
     if (MakeSwap(beamSc, 8, 64)) {   // beam colour (premultiplied, semi-transparent cyan)
         uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -979,7 +979,7 @@ static void FrameLoop() {
                             q.size = {(x1 - x0) / sc / K * hd, (y1 - y0) / sc / K * hd};
                             q.pose = {{0, 0, 0, 1}, {(cx - 320.f) / K * hd, -(cy - 240.f) / K * hd + s_hudY, -hd}};
                         }
-                        if (bl.layer == 2 && !mValid[b]) continue;          // cached octagon only exists attached to the target
+                        if (bl.layer >= 2 && !mValid[b]) continue;          // cached octagon / lock reticle only exist attached to the target
                         if (mValid[b]) {   // follows its object in the same (blended) state as the rendered eyes
                             q.pose.position = {mPos[b][0], mPos[b][1], mPos[b][2]};
                             // face the viewer (works all around, not only in front)
