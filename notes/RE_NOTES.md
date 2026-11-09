@@ -112,3 +112,28 @@ Target binary: `DARK.EXE` from the Steam 30th Anniversary Edition. It is the Win
 - **Sprite 0x3A** (blitted at 0x45442A inside the marker function) is the **lead indicator**. The octagon, missile lock and arrows are line-drawn.
 - **Marker clipping:** the game clips markers to its own view rectangle and draws edge arrows for off-view targets.
 - **HUD colours:** p2den displays HUD graphics with red and blue swapped relative to the scene palette it uses for the 3D image. This was measured on its output for every HUD colour.
+
+## Flight controls
+- **Joystick read:** `FUN_0046A378` calls `joyGetPosEx(0)` and stores the raw values:
+
+  | Raw value | Location |
+  |---|---|
+  | X | `game+0x27948` |
+  | Y | `+0x2794C` |
+  | Z (throttle) | `+0x27980` |
+  | Buttons byte | `+0x27960` |
+
+  The caller is `FUN_0044B718`, gated by the flags at `+0x27920` (bit 1 = stick, bit 4 = throttle).
+- **Normalisation:** `FUN_0044B764` (call site `0x44FE14`) normalises to X `+0x27928`, Y `+0x2792C` (-1..1) and throttle `+0x27970` (0..1). p2den redirects this call to its own controller code.
+- **Player control function:** `FUN_0044FD94`, case 0. Control method byte at `0x52E062`, low 2 bits: 0 mouse, 1 joystick, 2 joystick + throttle. It writes the player's control values into the player entry (`game + player*0x3A0`, player = `*(game+0x2785C)`):
+
+  | Control | Offset | Source |
+  |---|---|---|
+  | Pitch | `+0x12A8` | Y |
+  | Roll | `+0x12AC` | -X, or ±4 from the roll keys |
+  | Yaw | `+0x12B0` | -X |
+  | Speed setpoint | `+0x1298` | throttle × max speed; max speed = `*(float*)(0x4C6924 + type*0x48)`, type = `*(int*)(entry+0x11E6) >> 16` |
+
+  At `0x4503F6` (`cmp byte [0x52E063],0`, the invert option) all input handling is done. Damage scaling and inversion come after. p2vr writes its axes there.
+- **Key-check function** `FUN_0046A1C8` (al = DirectInput scancode, bl = 0x10 for edge-triggered, dl = Shift/Ctrl/Alt mask). It reads a held-key table at `0x55D3F0` and a just-pressed table at `0x55D4F0`.
+  - Writing into these tables does not reach the game while p2den is active. p2vr therefore sends real key presses (SendInput scancodes).

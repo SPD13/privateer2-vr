@@ -32,6 +32,20 @@ These steps assume Windows, Visual Studio 2026 (x86 toolset) and Python 3.
 3. Copy `build/p2vr.dll`, `build/openxr_loader.dll` and `dist/p2vr.ini` into the folder.
 4. Start SteamVR, then run `DARKVR.EXE`.
 
+## VR controllers (SteamVR; every action is remappable in SteamVR > Controller bindings)
+| Control | In flight | In menus / bases / films |
+|---|---|---|
+| Right stick | Pitch / yaw | - |
+| Left stick | Roll (x), throttle up/down (y); click = speed zero | - |
+| Right trigger | Fire guns | Left click (laser pointer) |
+| Right grip | Afterburner | Right click |
+| Left trigger / grip | Fire missile / match target speed | - |
+| A / B | Cycle targets / nearest hostile | - |
+| X / Y (left A / B) | Cycle weapons / jump | - |
+| Right stick click | Recenter view | Recenter view |
+
+Axes are written directly into the game's flight controls. Buttons are sent as the game's own keys (configurable scancodes in `p2vr.ini`).
+
 ## Controls (in game)
 | Keys | Action |
 |---|---|

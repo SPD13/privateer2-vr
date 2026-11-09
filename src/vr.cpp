@@ -27,6 +27,12 @@ static LogFn Log;
 #define XRCHECK(x) do { XrResult r_ = (x); if (XR_FAILED(r_)) { Log("[vr] %s failed: %d (line %d)", #x, (int)r_, __LINE__); return false; } } while (0)
 
 // ---------------------------------------------------------------- settings (p2vr.ini [VR])
+// ---------------------------------------------------------------- controller actions
+static XrActionSet s_actSet; static XrAction s_actStickR, s_actStickL, s_actRecenter, s_actBtn[VB_COUNT];
+// laser pointer for menus / films (outside flight): aim pose, left and right click
+static XrAction s_actAim, s_actClick, s_actRClick; static XrSpace s_aimSpace;
+static bool s_actionsReady; static CRITICAL_SECTION s_ctlCs; static VrControls s_ctl;
+static float s_deadzone = 0.15f;
 static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size
 static int   s_eyeMax = 2048;        // largest eye dimension (BRender's own check is 2048; p2vr patches it out above that)
 static float s_offQuat[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};   // per-eye rotation to the centre of its (asymmetric) fov
@@ -79,6 +85,10 @@ static HANDLE   s_screenHandle; static int s_screenW, s_screenH; static uint32_t
 
 // ---------------------------------------------------------------- public API (game thread side)
 bool Vr_Active() { return s_active != 0; }
+bool Vr_GetControls(VrControls* c) {
+    EnterCriticalSection(&s_ctlCs); *c = s_ctl; LeaveCriticalSection(&s_ctlCs);
+    return c->active;
+}
 LUID Vr_AdapterLuid() { return s_luid; }
 void Vr_RequestRecenter() { InterlockedExchange(&s_recenter, 1); }
 void Vr_SetReticleDistance(float m) { s_retWanted = m; }
@@ -297,6 +307,193 @@ static bool CreateRecenteredLocal(const XrPosef* pose) {
     return true;
 }
 
+static XrPath P(const char* s) { XrPath p = XR_NULL_PATH; xrStringToPath(inst, s, &p); return p; }
+static bool MakeAction(XrAction* a, const char* name, const char* loc, XrActionType t) {
+    XrActionCreateInfo ci = {XR_TYPE_ACTION_CREATE_INFO};
+    strcpy_s(ci.actionName, name); strcpy_s(ci.localizedActionName, loc); ci.actionType = t;
+    return XR_SUCCEEDED(xrCreateAction(s_actSet, &ci, a));
+}
+// Flight controls as OpenXR actions. SteamVR lists them in its binding UI so every button can be remapped;
+// defaults are suggested for Index-style and Touch-style controllers.
+static void CreateActions() {
+    XrActionSetCreateInfo si = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    strcpy_s(si.actionSetName, "flight"); strcpy_s(si.localizedActionSetName, "Flight"); si.priority = 0;
+    if (XR_FAILED(xrCreateActionSet(inst, &si, &s_actSet))) { Log("[ctl] xrCreateActionSet failed"); return; }
+    bool ok = MakeAction(&s_actStickR, "pitch_yaw", "Pitch / Yaw", XR_ACTION_TYPE_VECTOR2F_INPUT) &&
+              MakeAction(&s_actStickL, "roll_throttle", "Roll / Throttle", XR_ACTION_TYPE_VECTOR2F_INPUT) &&
+              MakeAction(&s_actRecenter, "recenter", "Recenter view", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    static const char* names[VB_COUNT][2] = {{"fire_guns", "Fire guns"}, {"fire_missile", "Fire missile"}, {"afterburner", "Afterburner"},
+        {"match_speed", "Match target speed"}, {"cycle_target", "Cycle targets"}, {"target_hostile", "Target nearest hostile"},
+        {"cycle_weapon", "Cycle weapons"}, {"jump", "Jump"}, {"speed_zero", "Speed to zero"}};
+    for (int i = 0; i < VB_COUNT && ok; i++) ok = MakeAction(&s_actBtn[i], names[i][0], names[i][1], XR_ACTION_TYPE_BOOLEAN_INPUT);
+    ok = ok && MakeAction(&s_actAim, "pointer", "Menu pointer", XR_ACTION_TYPE_POSE_INPUT) &&
+         MakeAction(&s_actClick, "menu_click", "Menu click", XR_ACTION_TYPE_BOOLEAN_INPUT) &&
+         MakeAction(&s_actRClick, "menu_right_click", "Menu right click (cycle hotspots)", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    if (!ok) { Log("[ctl] xrCreateAction failed"); return; }
+
+    struct B { XrAction a; const char* path; };
+    auto suggest = [&](const char* profile, const B* b, int n) {
+        std::vector<XrActionSuggestedBinding> v;
+        for (int i = 0; i < n; i++) v.push_back({b[i].a, P(b[i].path)});
+        XrInteractionProfileSuggestedBinding sb = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        sb.interactionProfile = P(profile); sb.suggestedBindings = v.data(); sb.countSuggestedBindings = (uint32_t)v.size();
+        XrResult r = xrSuggestInteractionProfileBindings(inst, &sb);
+        Log("[ctl] default bindings for %s: %s", profile, XR_SUCCEEDED(r) ? "ok" : "rejected");
+    };
+    const B index[] = {
+        {s_actStickR, "/user/hand/right/input/thumbstick"}, {s_actStickL, "/user/hand/left/input/thumbstick"},
+        {s_actRecenter, "/user/hand/right/input/thumbstick/click"},
+        {s_actBtn[VB_GUNS], "/user/hand/right/input/trigger/value"}, {s_actBtn[VB_MISSILE], "/user/hand/left/input/trigger/value"},
+        {s_actBtn[VB_AFTERBURNER], "/user/hand/right/input/squeeze/value"}, {s_actBtn[VB_MATCH_SPEED], "/user/hand/left/input/squeeze/value"},
+        {s_actBtn[VB_CYCLE_TARGET], "/user/hand/right/input/a/click"}, {s_actBtn[VB_TARGET_HOSTILE], "/user/hand/right/input/b/click"},
+        {s_actBtn[VB_CYCLE_WEAPON], "/user/hand/left/input/a/click"}, {s_actBtn[VB_JUMP], "/user/hand/left/input/b/click"},
+        {s_actBtn[VB_SPEED_ZERO], "/user/hand/left/input/thumbstick/click"},
+        {s_actAim, "/user/hand/right/input/aim/pose"}, {s_actClick, "/user/hand/right/input/trigger/value"},
+        {s_actRClick, "/user/hand/right/input/squeeze/value"}};
+    suggest("/interaction_profiles/valve/index_controller", index, sizeof index / sizeof index[0]);
+    const B touch[] = {
+        {s_actStickR, "/user/hand/right/input/thumbstick"}, {s_actStickL, "/user/hand/left/input/thumbstick"},
+        {s_actRecenter, "/user/hand/right/input/thumbstick/click"},
+        {s_actBtn[VB_GUNS], "/user/hand/right/input/trigger/value"}, {s_actBtn[VB_MISSILE], "/user/hand/left/input/trigger/value"},
+        {s_actBtn[VB_AFTERBURNER], "/user/hand/right/input/squeeze/value"}, {s_actBtn[VB_MATCH_SPEED], "/user/hand/left/input/squeeze/value"},
+        {s_actBtn[VB_CYCLE_TARGET], "/user/hand/right/input/a/click"}, {s_actBtn[VB_TARGET_HOSTILE], "/user/hand/right/input/b/click"},
+        {s_actBtn[VB_CYCLE_WEAPON], "/user/hand/left/input/x/click"}, {s_actBtn[VB_JUMP], "/user/hand/left/input/y/click"},
+        {s_actBtn[VB_SPEED_ZERO], "/user/hand/left/input/thumbstick/click"},
+        {s_actAim, "/user/hand/right/input/aim/pose"}, {s_actClick, "/user/hand/right/input/trigger/value"},
+        {s_actRClick, "/user/hand/right/input/squeeze/value"}};
+    suggest("/interaction_profiles/oculus/touch_controller", touch, sizeof touch / sizeof touch[0]);
+
+    XrSessionActionSetsAttachInfo ai = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO}; ai.countActionSets = 1; ai.actionSets = &s_actSet;
+    s_actionsReady = XR_SUCCEEDED(xrAttachSessionActionSets(sess, &ai));
+    XrActionSpaceCreateInfo asi = {XR_TYPE_ACTION_SPACE_CREATE_INFO}; asi.action = s_actAim; asi.poseInActionSpace = {{0, 0, 0, 1}, {0, 0, 0}};
+    xrCreateActionSpace(sess, &asi, &s_aimSpace);
+    Log("[ctl] controller actions %s", s_actionsReady ? "attached" : "FAILED to attach");
+}
+
+// ---------------------------------------------------------------- menu pointer (outside flight)
+static Swap beamSc; static bool beamReady;
+static bool s_ptrHit; static XrVector3f s_ptrFrom, s_ptrTo; static bool s_clickWas, s_rclickWas;
+static HWND GameWnd() {
+    struct F { HWND best; LONG area; } f = {nullptr, 0};
+    EnumWindows([](HWND w, LPARAM lp) -> BOOL {
+        DWORD pid; GetWindowThreadProcessId(w, &pid);
+        if (pid != GetCurrentProcessId() || !IsWindowVisible(w)) return TRUE;
+        RECT r; GetClientRect(w, &r); LONG a = (r.right - r.left) * (r.bottom - r.top);
+        F* f = (F*)lp; if (a > f->area) { f->area = a; f->best = w; } return TRUE;
+    }, (LPARAM)&f);
+    return f.best;
+}
+static bool GameFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
+static void MouseButton(DWORD flag) { INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = flag; SendInput(1, &in, sizeof in); }
+// Ray from the right controller onto the virtual screen -> move the real mouse there; trigger/grip = clicks.
+static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW, float screenY) {
+    s_ptrHit = false;
+    if (flight || !s_actionsReady || !s_aimSpace) { s_clickWas = s_rclickWas = false; return; }
+    XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(s_aimSpace, localSpace, t, &loc)) ||
+        !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) || !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return;
+    const XrQuaternionf& q = loc.pose.orientation; const XrVector3f& o = loc.pose.position;
+    // forward (-Z) of the aim pose
+    float dx = -(2 * (q.x * q.z + q.w * q.y)), dy = -(2 * (q.y * q.z - q.w * q.x)), dz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    s_ptrFrom = o;
+    float len = 3.0f;
+    if (dz < -1e-3f) {                                  // screen plane z = -screenDist
+        float tt = (-screenDist - o.z) / dz;
+        float hx = o.x + dx * tt, hy = o.y + dy * tt;
+        float u = hx / screenW + 0.5f, v = 0.5f - (hy - screenY) / (screenW * 0.75f);
+        if (tt > 0 && u >= 0 && u <= 1 && v >= 0 && v <= 1) {
+            len = tt; s_ptrHit = true;
+            HWND w = GameWnd();
+            if (w && GameFront()) {
+                RECT r; GetClientRect(w, &r);
+                POINT pt = {LONG((s_uOff + u * s_uScale) * r.right), LONG(v * r.bottom)};
+                ClientToScreen(w, &pt);
+                static POINT last = {-1, -1};
+                if (pt.x != last.x || pt.y != last.y) {
+                    last = pt;
+                    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+                    INPUT in = {}; in.type = INPUT_MOUSE;
+                    in.mi.dx = LONG((pt.x - vx) * 65535.0 / (vw - 1)); in.mi.dy = LONG((pt.y - vy) * 65535.0 / (vh - 1));
+                    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+                    SendInput(1, &in, sizeof in);
+                }
+            }
+        }
+    }
+    s_ptrTo = {o.x + dx * len, o.y + dy * len, o.z + dz * len};
+    // clicks (only into the game window)
+    XrActionStateGetInfo gi = {XR_TYPE_ACTION_STATE_GET_INFO}; XrActionStateBoolean b = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    gi.action = s_actClick; bool click = XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState;
+    b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actRClick; bool rclick = XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState;
+    bool front = GameFront();
+    if (front && click != s_clickWas) MouseButton(click ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
+    if (front && rclick != s_rclickWas) MouseButton(rclick ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
+    s_clickWas = click; s_rclickWas = rclick;
+}
+// Beam: a thin quad from the controller to the hit point, turned around its axis to face the viewer.
+static bool BeamLayer(XrCompositionLayerQuad& q, const XrVector3f& head) {
+    if (!beamReady) return false;
+    float ax = s_ptrTo.x - s_ptrFrom.x, ay = s_ptrTo.y - s_ptrFrom.y, az = s_ptrTo.z - s_ptrFrom.z, L = sqrtf(ax*ax + ay*ay + az*az);
+    if (L < 0.05f) return false;
+    float y[3] = {ax / L, ay / L, az / L};
+    float mx = (s_ptrFrom.x + s_ptrTo.x) * 0.5f, my = (s_ptrFrom.y + s_ptrTo.y) * 0.5f, mz = (s_ptrFrom.z + s_ptrTo.z) * 0.5f;
+    float t[3] = {head.x - mx, head.y - my, head.z - mz}, d = t[0]*y[0] + t[1]*y[1] + t[2]*y[2];
+    float z[3] = {t[0] - d*y[0], t[1] - d*y[1], t[2] - d*y[2]}, zl = sqrtf(z[0]*z[0] + z[1]*z[1] + z[2]*z[2]);
+    if (zl < 1e-4f) return false;
+    for (float& v : z) v /= zl;
+    float x[3] = {y[1]*z[2] - y[2]*z[1], y[2]*z[0] - y[0]*z[2], y[0]*z[1] - y[1]*z[0]};
+    // rotation matrix (columns x, y, z) -> quaternion
+    float tr = x[0] + y[1] + z[2], qw, qx, qy, qz;
+    if (tr > 0) { float s2 = sqrtf(tr + 1) * 2; qw = 0.25f * s2; qx = (y[2] - z[1]) / s2; qy = (z[0] - x[2]) / s2; qz = (x[1] - y[0]) / s2; }
+    else if (x[0] > y[1] && x[0] > z[2]) { float s2 = sqrtf(1 + x[0] - y[1] - z[2]) * 2; qw = (y[2] - z[1]) / s2; qx = 0.25f * s2; qy = (y[0] + x[1]) / s2; qz = (z[0] + x[2]) / s2; }
+    else if (y[1] > z[2]) { float s2 = sqrtf(1 + y[1] - x[0] - z[2]) * 2; qw = (z[0] - x[2]) / s2; qx = (y[0] + x[1]) / s2; qy = 0.25f * s2; qz = (z[1] + y[2]) / s2; }
+    else { float s2 = sqrtf(1 + z[2] - x[0] - y[1]) * 2; qw = (x[1] - y[0]) / s2; qx = (z[0] + x[2]) / s2; qy = (z[1] + y[2]) / s2; qz = 0.25f * s2; }
+    q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    q.space = localSpace; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    q.subImage.swapchain = beamSc.sc; q.subImage.imageRect = {{0, 0}, {beamSc.w, beamSc.h}};
+    q.size = {0.004f, L}; q.pose = {{qx, qy, qz, qw}, {mx, my, mz}};
+    q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    return true;
+}
+
+static float Dead(float v) {   // deadzone with rescale, plus a gentle curve for fine aiming
+    float a = fabsf(v); if (a < s_deadzone) return 0;
+    a = (a - s_deadzone) / (1 - s_deadzone); a = a * a * 0.5f + a * 0.5f;
+    return v < 0 ? -a : a;
+}
+static void PollControls(bool focused) {
+    VrControls c = {};
+    if (s_actionsReady && focused) {
+        XrActiveActionSet as = {s_actSet, XR_NULL_PATH};
+        XrActionsSyncInfo sy = {XR_TYPE_ACTIONS_SYNC_INFO}; sy.countActiveActionSets = 1; sy.activeActionSets = &as;
+        if (XR_SUCCEEDED(xrSyncActions(sess, &sy))) {
+            XrActionStateGetInfo gi = {XR_TYPE_ACTION_STATE_GET_INFO};
+            XrActionStateVector2f v = {XR_TYPE_ACTION_STATE_VECTOR2F};
+            bool any = false;
+            gi.action = s_actStickR; if (XR_SUCCEEDED(xrGetActionStateVector2f(sess, &gi, &v)) && v.isActive) { c.yaw = Dead(v.currentState.x); c.pitch = Dead(v.currentState.y); any = true; }
+            v = {XR_TYPE_ACTION_STATE_VECTOR2F};
+            gi.action = s_actStickL; if (XR_SUCCEEDED(xrGetActionStateVector2f(sess, &gi, &v)) && v.isActive) { c.roll = Dead(v.currentState.x); c.throttleRate = Dead(v.currentState.y); any = true; }
+            XrActionStateBoolean b = {XR_TYPE_ACTION_STATE_BOOLEAN};
+            for (int i = 0; i < VB_COUNT; i++) {
+                b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actBtn[i];
+                if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive) { any = true; if (b.currentState) c.buttons |= 1u << i; }
+            }
+            b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actRecenter;
+            if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState && b.changedSinceLastSync) Vr_RequestRecenter();
+            c.active = any;
+        }
+    }
+    static bool wasActive; static DWORD lastDiag;
+    if (c.active != wasActive) { wasActive = c.active; Log("[ctl] VR controllers %s", c.active ? "active" : "inactive"); }
+    if (GetTickCount() - lastDiag > 5000) {
+        lastDiag = GetTickCount();
+        Log("[ctl] state: session %d focused %d actions %d active %d | R(%.2f %.2f) L(%.2f %.2f) buttons %03x",
+            (int)sessState, focused, s_actionsReady, c.active, c.yaw, c.pitch, c.roll, c.throttleRate, c.buttons);
+    }
+    EnterCriticalSection(&s_ctlCs); s_ctl = c; LeaveCriticalSection(&s_ctlCs);
+}
+
 static bool InitXr() {
     // SteamVR does not register its 32-bit runtime as active; point the loader at it.
     char buf[MAX_PATH];
@@ -327,6 +524,7 @@ static bool InitXr() {
     XrSessionCreateInfo sci = {XR_TYPE_SESSION_CREATE_INFO}; sci.next = &gb; sci.systemId = sysId;
     XRCHECK(xrCreateSession(inst, &sci, &sess));
     if (!CreateRecenteredLocal(nullptr)) return false;
+    CreateActions();
     XrReferenceSpaceCreateInfo vs = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
     vs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW; vs.poseInReferenceSpace = {{0, 0, 0, 1}, {0, 0, 0}};
     XRCHECK(xrCreateReferenceSpace(sess, &vs, &viewSpace));
@@ -386,7 +584,16 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     }
     s_retPx = (int)(s_retFrac * HUD_PX_W + 0.5f); if (s_retPx < 16) s_retPx = 16; if (s_retPx > HUD_PX_H) s_retPx = HUD_PX_H;
     if (!MakeSwap(quadSc, HUD_PX_W + s_retPx, HUD_PX_H)) return false;   // [ HUD | crosshair crop ]
-    if (!MakeSwap(markSc, 3840, 960)) return false;                        // [ markers | lead indicator | cached octagon ], 2x
+    if (!MakeSwap(markSc, 3840, 960)) return false;
+    if (MakeSwap(beamSc, 8, 64)) {   // beam colour (premultiplied, semi-transparent cyan)
+        uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        if (XR_SUCCEEDED(xrAcquireSwapchainImage(beamSc.sc, &ai, &i))) {
+            XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; wi.timeout = XR_INFINITE_DURATION; xrWaitSwapchainImage(beamSc.sc, &wi);
+            float col[4] = {0.10f, 0.45f, 0.60f, 0.6f}; ctx->ClearRenderTargetView(beamSc.rtv[i], col);
+            XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO}; xrReleaseSwapchainImage(beamSc.sc, &ri);
+            beamReady = true;
+        }
+    }                        // [ markers | lead indicator | cached octagon ], 2x
     EnterCriticalSection(&s_cs);
     s_target.width = w; s_target.height = h; s_target.tanHalfH = tH; s_target.tanHalfV = tV; s_targetValid = true;
     LeaveCriticalSection(&s_cs);
@@ -572,6 +779,15 @@ static void UpdateScreen(bool flight) {
 static void HandleEvents() {
     XrEventDataBuffer ev = {XR_TYPE_EVENT_DATA_BUFFER};
     while (xrPollEvent(inst, &ev) == XR_SUCCESS) {
+        if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED && sess) {   // which controllers SteamVR reports
+            for (const char* hand : {"/user/hand/left", "/user/hand/right"}) {
+                XrInteractionProfileState ps = {XR_TYPE_INTERACTION_PROFILE_STATE};
+                char name[XR_MAX_PATH_LENGTH] = "none"; uint32_t n = 0;
+                if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(sess, P(hand), &ps)) && ps.interactionProfile != XR_NULL_PATH)
+                    xrPathToString(inst, ps.interactionProfile, sizeof name, &n, name);
+                Log("[ctl] %s controller profile: %s", hand, name);
+            }
+        }
         if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             sessState = ((XrEventDataSessionStateChanged*)&ev)->state;
             Log("[vr] session state %d", (int)sessState);
@@ -611,6 +827,7 @@ static void FrameLoop() {
         if (XR_FAILED(xrWaitFrame(sess, &fwi, &fs))) { Sleep(10); continue; }
         XrFrameBeginInfo fbi = {XR_TYPE_FRAME_BEGIN_INFO}; xrBeginFrame(sess, &fbi);
         if (InterlockedExchange(&s_recenter, 0)) DoRecenter(fs.predictedDisplayTime);
+        PollControls(sessState == XR_SESSION_STATE_FOCUSED);
 
         XrViewLocateInfo vli = {XR_TYPE_VIEW_LOCATE_INFO};
         vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = fs.predictedDisplayTime; vli.space = localSpace;
@@ -647,6 +864,9 @@ static void FrameLoop() {
         XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         XrCompositionLayerQuad quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad reticle = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad beam = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (targetDone && sessState == XR_SESSION_STATE_FOCUSED) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
+        else s_ptrHit = false;
         XrCompositionLayerQuad marks[MAX_BLOBS];
         if (fs.shouldRender && targetDone) {
             if (flight) { UploadEyes(); UpdateMarkers(); }
@@ -724,6 +944,10 @@ static void FrameLoop() {
                 }
             }
         }
+        if (!flight && haveScreen && targetDone && sessState == XR_SESSION_STATE_FOCUSED && fs.shouldRender) {
+            XrVector3f head = {(s_views[0].pos[0] + s_views[1].pos[0]) * 0.5f, (s_views[0].pos[1] + s_views[1].pos[1]) * 0.5f, (s_views[0].pos[2] + s_views[1].pos[2]) * 0.5f};
+            if (BeamLayer(beam, head)) layers.push_back((XrCompositionLayerBaseHeader*)&beam);
+        }
         XrFrameEndInfo fei = {XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime; fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         fei.layerCount = (uint32_t)layers.size(); fei.layers = layers.data();
@@ -750,7 +974,8 @@ static float IniF(const char* ini, const char* key, float def) {
 
 void Vr_Start(const char* ini, LogFn log) {
     Log = log;
-    InitializeCriticalSection(&s_cs);
+    InitializeCriticalSection(&s_cs); InitializeCriticalSection(&s_ctlCs);
+    s_deadzone = IniF(ini, "STICK_DEADZONE", 0.15f);
     s_eyeScale = IniF(ini, "EYE_SCALE", 1.0f);
     s_eyeMax = (int)IniF(ini, "EYE_MAX", 2048.0f); if (s_eyeMax < 512) s_eyeMax = 512; if (s_eyeMax > 8192) s_eyeMax = 8192;
     s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 0.0f); s_hudY = IniF(ini, "HUD_Y", 0.0f);

@@ -26,6 +26,17 @@ void Vr_SetEyeCrosshair(int eye, const float rows[9], int bx0, int by0, int bx1,
                         float gx0, float gy0, float gx1, float gy1);
 void Vr_SetScreenSource(HANDLE sharedTex, int w, int h, uint32_t frameNo);  // from the p2den Present hook
 void Vr_RequestRecenter();
+
+// ---- VR controllers (OpenXR actions; remappable in SteamVR's controller binding screen)
+enum VrButton { VB_GUNS, VB_MISSILE, VB_AFTERBURNER, VB_MATCH_SPEED, VB_CYCLE_TARGET, VB_TARGET_HOSTILE,
+                VB_CYCLE_WEAPON, VB_JUMP, VB_SPEED_ZERO, VB_COUNT };
+struct VrControls {
+    bool  active;                 // session focused and controller actions available
+    float pitch, yaw;             // right stick: -1..1 (pitch +: stick forward)
+    float roll, throttleRate;     // left stick: roll -1..1 (+ right), throttle rate -1..1 (+ forward)
+    uint32_t buttons;             // bit per VrButton (held)
+};
+bool Vr_GetControls(VrControls* c);
 void Vr_SetReticleDistance(float metres);   // depth of what is under the crosshair (<= 0: use RETICLE_DIST)
 LONG Vr_FrameCounter();                    // increments whenever new predicted eye poses are available
 // One HUD marker (bracket, lead indicator, nav marker) found in the 640x480 marker image, with the distance of

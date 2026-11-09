@@ -43,7 +43,16 @@ static const int GAME_DUST = 0x279e0, SHIP_POSPTR = 0x127c;
 static const uintptr_t ADDR_MARKERS_FN   = 0x453b00;
 static const uintptr_t ADDR_MARKERS_CALL = 0x439ac3;   // E8 rel32 call site
 static const uintptr_t ADDR_HUD_FN = 0x454b5c, ADDR_HUD_CALL = 0x439adb;   // static HUD
-static const uintptr_t ADDR_PIP_CALL = 0x45442a;   // inside the marker function: blit of sprite 0x3a = lead indicator
+static const uintptr_t ADDR_PIP_CALL = 0x45442a;
+// Flight controls: joystick normalise call inside the player control function, roll write point, control method,
+// key tables (DirectInput scancode indexed: held state / just-pressed)
+static const uintptr_t ADDR_JOYNORM_FN = 0x44b764, ADDR_JOYNORM_CALL = 0x44fe14;
+static const uintptr_t ADDR_ROLL_PATCH = 0x4503f6;   // cmp byte ptr [0x52e063],0 (7 bytes), ebp = game
+static const uintptr_t ADDR_CTRL_METHOD = 0x52e062;  // low 2 bits: 0 mouse, 1 joystick, 2 joystick + throttle
+static const uintptr_t ADDR_KEYSTATE = 0x55d3f0, ADDR_KEYEDGE = 0x55d4f0;
+static const int GAME_JOY_FLAGS = 0x27920, GAME_JOY_X = 0x27928, GAME_JOY_Y = 0x2792c, GAME_JOY_THROTTLE = 0x27970,
+                 GAME_JOY_BUTTONS = 0x27960, GAME_PLAYER = 0x2785c;
+   // inside the marker function: blit of sprite 0x3a = lead indicator
 static const int GAME_STARS = 0x279dc, GAME_SHIPIDX = 0x27858, GAME_SHIPS = 0x1210, SHIP_STRIDE = 0x3a0, NUM_STARS = 0x28a;
 static const uint8_t   BEGIN_PROLOGUE[6] = {0x56, 0x57, 0xC8, 0x34, 0x00, 0x00}; // push esi; push edi; enter 0x34,0
 
@@ -90,7 +99,13 @@ static bool  g_retInEyes = true;     // crosshair + lead indicator drawn into th
 static float g_retFracP2 = 0.20f;    // crosshair region (fraction of the HUD width), same as RETICLE_SIZE
 static float g_observerBack = 1.0f;  // metres: eyes sit this far behind the ship centre (HUD plane passes the centre)
 static bool  g_showOwnShip = false;  // draw the player's own ship model in VR (visible once the eyes are behind it)    // crosshair/markers at the depth of what is under the crosshair
-static int   g_smooth = 1;           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
+static int   g_smooth = 1;
+// VR controllers
+static bool  g_ctlEnable = true;
+static float g_rollGain = 2.5f, g_yawGain = 1.0f, g_pitchGain = 1.0f, g_throttleRate = 0.6f;
+static bool  g_invertPitch = false, g_invertRoll = false;
+static uint8_t g_keyFor[VB_COUNT] = {0x39, 0x1C, 0x0F, 0x2D, 0x1E, 0x11, 0x23, 0x24, 0x1A};   // DirectInput scancodes
+static volatile bool g_rollActive; static volatile float g_rollValue;           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
 static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
 bool Capture_GetPalette(uint8_t out[1024]);
@@ -1216,6 +1231,59 @@ static void RenderVrEyes() {
     }
 }
 
+// ---------------------------------------------------------------- VR controllers -> game
+// Axes are written straight into the player's flight-control values (pitch +0x12a8, roll +0x12ac, yaw +0x12b0) at
+// 0x4503f6: after all of the game's and p2den's input handling, before the game's own damage scaling and invert
+// option. The throttle sets the speed setpoint (+0x1298) only while the throttle stick is used. Buttons are sent
+// as real key presses (scancodes), so they pass through p2den's input layer like a keyboard.
+static float g_throttle = -1; static LONGLONG g_lastCtl; static uint32_t g_prevButtons; static bool g_ctlOn;
+static volatile float g_pitchValue, g_yawValue, g_speedValue; static volatile bool g_speedActive;
+
+static void SendKey(uint8_t sc, bool down) {
+    INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wScan = sc;
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP) | (sc == 0x1C && false ? KEYEVENTF_EXTENDEDKEY : 0);
+    SendInput(1, &in, sizeof in);
+}
+static bool GameInFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
+static void ReleaseVrKeys() {
+    for (int i = 0; i < VB_COUNT; i++) if ((g_prevButtons & (1u << i)) && i != VB_SPEED_ZERO) SendKey(g_keyFor[i], false);
+    g_prevButtons = 0;
+}
+// Once per game cycle (game thread): compute the values the roll-write hook puts into the flight controls.
+static void UpdateControlMode() {
+    VrControls c = {};
+    bool on = g_ctlEnable && g_vrEnable && Vr_Active() && Vr_GetControls(&c) && g_game;
+    if (on != g_ctlOn) { Log("[ctl] VR flight controls %s", on ? "on" : "off"); if (!on) { ReleaseVrKeys(); g_rollActive = false; g_speedActive = false; } }
+    g_ctlOn = on;
+    if (!on) return;
+    LONGLONG now = Now(); double dt = g_lastCtl ? Ms(now - g_lastCtl) / 1000.0 : 0; g_lastCtl = now; if (dt > 0.2) dt = 0.2;
+    uint8_t* entry = g_game + *(int*)(g_game + GAME_PLAYER) * SHIP_STRIDE;
+    float maxSpd = *(float*)(0x4c6924 + (*(int*)(entry + 0x11e6) >> 16) * 0x48);
+    // axes in the game's pre-invert joystick convention: pitch = joystick Y (forward negative), yaw = roll = -X
+    g_pitchValue = -c.pitch * g_pitchGain * (g_invertPitch ? -1.f : 1.f);
+    g_yawValue   = -c.yaw * g_yawGain;
+    g_rollValue  = -c.roll * g_rollGain * (g_invertRoll ? -1.f : 1.f);
+    g_rollActive = true;
+    // throttle: follow the game's setting unless the throttle stick / speed-zero is used
+    bool zero = (c.buttons >> VB_SPEED_ZERO) & 1;
+    if (maxSpd > 0 && (c.throttleRate != 0 || zero)) {
+        if (!g_speedActive) { g_throttle = *(float*)(entry + 0x1298) / maxSpd; }
+        g_throttle += (float)(c.throttleRate * g_throttleRate * dt);
+        if (zero) g_throttle = 0;
+        if (g_throttle < 0) g_throttle = 0; if (g_throttle > 1) g_throttle = 1;
+        g_speedValue = g_throttle * maxSpd; g_speedActive = true;
+    } else g_speedActive = false;
+    // buttons -> key presses (only into the game window)
+    bool front = GameInFront();
+    for (int i = 0; i < VB_COUNT; i++) {
+        if (i == VB_SPEED_ZERO) continue;
+        bool down = front && ((c.buttons >> i) & 1), was = (g_prevButtons >> i) & 1;
+        if (down != was) SendKey(g_keyFor[i], down);
+    }
+    g_prevButtons = front ? c.buttons : 0;
+}
+extern "C" void __cdecl ApplyStick() {}   // joystick path no longer used (kept as a no-op hook)
+
 // ---------------------------------------------------------------- hooks
 static LONGLONG g_passStart; static int g_passIdx = -1;
 
@@ -1262,6 +1330,7 @@ extern "C" void __cdecl PostEnd() {
     if (idx == 1) {
         g_frames++;
         Smooth_SetGameThread();
+        UpdateControlMode();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
         static bool prev[9];
@@ -1439,6 +1508,46 @@ __declspec(naked) static void HookHudCall() {
     }
 }
 
+static uintptr_t g_joyNormFn = ADDR_JOYNORM_FN;
+static uint8_t g_fpuSave[108];
+__declspec(naked) static void HookJoyNormCall() {   // eax = game: run the game's normaliser, then apply the VR stick
+    __asm {
+        call dword ptr [g_joyNormFn]
+        pushad
+        fnsave g_fpuSave
+        call ApplyStick
+        frstor g_fpuSave
+        popad
+        ret
+    }
+}
+__declspec(naked) static void HookRollWrite() {     // replaces "cmp byte ptr [0x52e063],0" at 0x4503f6 (ebp = game): VR axes + speed
+    __asm {
+        cmp byte ptr [g_rollActive], 0
+        je done
+        push eax
+        push edx
+        mov eax, dword ptr [ebp + 0x2785c]
+        imul eax, eax, 0x3a0
+        mov edx, dword ptr [g_rollValue]
+        mov dword ptr [eax + ebp + 0x12ac], edx
+        mov edx, dword ptr [g_pitchValue]
+        mov dword ptr [eax + ebp + 0x12a8], edx
+        mov edx, dword ptr [g_yawValue]
+        mov dword ptr [eax + ebp + 0x12b0], edx
+        cmp byte ptr [g_speedActive], 0
+        je nospeed
+        mov edx, dword ptr [g_speedValue]
+        mov dword ptr [eax + ebp + 0x1298], edx
+    nospeed:
+        pop edx
+        pop eax
+    done:
+        cmp byte ptr ds:[0x52e063], 0
+        ret
+    }
+}
+
 __declspec(naked) static void HookEnd() {
     __asm {
         mov dword ptr ds:[0x55e640], 0   // original End body
@@ -1499,6 +1608,30 @@ static void InstallHooks() {
         VirtualProtect((void*)ADDR_PIP_CALL, 5, old, &old); f = true;
     }
     Log("hooks: begin=%d end=%d stars=%d markers=%d hud=%d pip=%d", a, b, c, d, e, f);
+    bool g1 = false, g2 = false;
+    {   const uint8_t* q = (const uint8_t*)ADDR_JOYNORM_CALL;
+        Log("[ctl] joystick call site bytes: %02x %02x %02x %02x %02x", q[0], q[1], q[2], q[3], q[4]); }
+    if (*(uint8_t*)ADDR_JOYNORM_CALL == 0xE8) {   // chain to whatever it calls now (p2den may have redirected it)
+        g_joyNormFn = ADDR_JOYNORM_CALL + 5 + *(int32_t*)(ADDR_JOYNORM_CALL + 1);
+        Log("[ctl] joystick normaliser call target %08x%s", (unsigned)g_joyNormFn, g_joyNormFn == ADDR_JOYNORM_FN ? " (game)" : " (redirected)");
+        DWORD old; VirtualProtect((void*)ADDR_JOYNORM_CALL, 5, PAGE_EXECUTE_READWRITE, &old);
+        *(int32_t*)(ADDR_JOYNORM_CALL + 1) = (int32_t)((uintptr_t)HookJoyNormCall - (ADDR_JOYNORM_CALL + 5));
+        VirtualProtect((void*)ADDR_JOYNORM_CALL, 5, old, &old); g1 = true;
+    }
+    static const uint8_t rollBytes[7] = {0x80, 0x3D, 0x63, 0xE0, 0x52, 0x00, 0x00};
+    if (!memcmp((void*)ADDR_ROLL_PATCH, rollBytes, 7)) {
+        DWORD old; VirtualProtect((void*)ADDR_ROLL_PATCH, 7, PAGE_EXECUTE_READWRITE, &old);
+        uint8_t* q = (uint8_t*)ADDR_ROLL_PATCH; q[0] = 0xE8; *(int32_t*)(q + 1) = (int32_t)((uintptr_t)HookRollWrite - (ADDR_ROLL_PATCH + 5));
+        q[5] = 0x90; q[6] = 0x90;
+        VirtualProtect((void*)ADDR_ROLL_PATCH, 7, old, &old); FlushInstructionCache(GetCurrentProcess(), q, 7); g2 = true;
+    }
+    Log("hooks: controls joystick=%d roll=%d", g1, g2);
+    for (uintptr_t slot : {(uintptr_t)0x570194, (uintptr_t)0x570198}) {   // joyGetNumDevs / joyGetPosEx import slots
+        void* fn = *(void**)slot; HMODULE m = nullptr; char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)fn, &m))
+            GetModuleFileNameA(m, name, MAX_PATH);
+        Log("[input] import slot %08x -> %p (%s)", (unsigned)slot, fn, name);
+    }
 }
 
 // ---------------------------------------------------------------- DirectDrawCreate wrapper (forwarded to p2den)
@@ -1536,6 +1669,14 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_actorLog = GetPrivateProfileIntA("VR", "ACTOR_LOG", 0, p);
         GetPrivateProfileStringA("VR", "LASER_WIDEN", "3.0", b, 32, p); g_laserWiden = (float)atof(b);
         g_smooth = GetPrivateProfileIntA("VR", "SMOOTH", 1, p);
+        g_ctlEnable = GetPrivateProfileIntA("VR", "VR_CONTROLS", 1, p) != 0;
+        g_invertPitch = GetPrivateProfileIntA("VR", "INVERT_PITCH", 0, p) != 0;
+        g_invertRoll = GetPrivateProfileIntA("VR", "INVERT_ROLL", 0, p) != 0;
+        GetPrivateProfileStringA("VR", "ROLL_GAIN", "2.5", b, 32, p); g_rollGain = (float)atof(b);
+        GetPrivateProfileStringA("VR", "THROTTLE_RATE", "0.6", b, 32, p); g_throttleRate = (float)atof(b);
+        {   static const char* keyNames[VB_COUNT] = {"KEY_FIRE_GUNS", "KEY_FIRE_MISSILE", "KEY_AFTERBURNER", "KEY_MATCH_SPEED",
+                "KEY_CYCLE_TARGET", "KEY_TARGET_HOSTILE", "KEY_CYCLE_WEAPON", "KEY_JUMP", "KEY_SPEED_ZERO"};
+            for (int i = 0; i < VB_COUNT; i++) g_keyFor[i] = (uint8_t)GetPrivateProfileIntA("VR", keyNames[i], g_keyFor[i], p); }
         g_retDynamic = GetPrivateProfileIntA("VR", "RETICLE_DYNAMIC", 0, p) != 0;
         GetPrivateProfileStringA("VR", "OBSERVER_BACK", "1.0", b, 32, p); g_observerBack = (float)atof(b);
         g_showOwnShip = GetPrivateProfileIntA("VR", "SHOW_OWN_SHIP", 0, p) != 0;
