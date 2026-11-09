@@ -55,7 +55,7 @@ Axes are written directly into the game's flight controls. Buttons are sent as t
 | Ctrl+F9 | Dump eye images to BMP (debug) |
 | Ctrl+F5/F6/F7 | Spike test modes (when VR is inactive) |
 
-All tuning lives in `p2vr.ini`: world scale, HUD placement, reticle distance, stars, dust and flare.
+All tuning lives in `p2vr.ini`; every setting, its effect and default is documented in [SETTINGS.md](SETTINGS.md).
 
 ## Docs
 - `SPIKE_REPORT.md`: the feasibility spike and its go/no-go result.
