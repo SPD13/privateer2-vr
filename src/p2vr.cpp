@@ -840,11 +840,35 @@ extern "C" void __cdecl PostMarkers() {
             if (octWorldW <= 0) { octWorldW = ww; octWorldH = wh; } else { octWorldW += (ww - octWorldW) * 0.3f; octWorldH += (wh - octWorldH) * 0.3f; }
         }
     }
-    for (int i = 0; i < nb; i++)
-        if (i != oct && blobs[i].layer == 0 && links[i].actor && links[i].actor == g_targetActor && tz > 0) {
-            float cx = (blobs[i].x0 + blobs[i].x1) * 0.5f, cy = (blobs[i].y0 + blobs[i].y1) * 0.5f;
-            links[i].offX = cx - tx; links[i].offY = cy - ty; links[i].keepOffset = true;   // animation around the target kept
+    // The game's own screen point for its target (entry+0x12d0 / +0x12d2, 16.16): it draws the octagon and the missile-lock
+    // reticle around it, and the lock reticle converges onto it. Offsets of target-attached markers are measured from it,
+    // so they line up with the cached octagon (centred on the target itself) and a completed lock sits exactly on it.
+    float gx = tx, gy = ty; bool lockActive = false;
+    if (g_targetActor && tz > 0) {
+        int player = *(int*)(g_game + 0x2785c), tgt = *(int*)(g_game + 0x1216 + player * SHIP_STRIDE) >> 16;
+        if (tgt >= 0 && tgt < 0x95) {
+            const uint8_t* te = g_game + tgt * SHIP_STRIDE;
+            gx = (float)(*(const int*)(te + 0x12d0) >> 16); gy = (float)(*(const int*)(te + 0x12d2) >> 16);
+            if (fabsf(gx - tx) > 120 || fabsf(gy - ty) > 120) { gx = tx; gy = ty; }   // stale (target off screen)
         }
+        lockActive = *(int*)(g_game + 0x279e4) != -1;            // a missile is selected: the lock reticle may be drawn
+        static DWORD lastLog;
+        if (GetTickCount() - lastLog > 5000) { lastLog = GetTickCount();
+            Log("[markers] target point game (%.0f,%.0f) vs projected (%.1f,%.1f), missile %s, lock %.2f", gx, gy, tx, ty,
+                lockActive ? "selected" : "none", *(float*)(g_game + 0x279f0)); }
+    }
+    for (int i = 0; i < nb; i++) {
+        if (i == oct || blobs[i].layer != 0 || tz <= 0 || !g_targetActor) continue;
+        float cx = (blobs[i].x0 + blobs[i].x1) * 0.5f, cy = (blobs[i].y0 + blobs[i].y1) * 0.5f;
+        bool mine = links[i].actor == g_targetActor;
+        // lock reticle pieces far from the target while converging: attach them to the target too (not the HUD glass)
+        if (!mine && !links[i].actor && lockActive && fabsf(cx - gx) < 220 && fabsf(cy - gy) < 220) mine = true;
+        if (!mine) continue;
+        links[i].actor = g_targetActor; links[i].w = (float)(blobs[i].x1 - blobs[i].x0 + 1); links[i].h = (float)(blobs[i].y1 - blobs[i].y0 + 1);
+        links[i].worldW = links[i].worldH = 0;
+        links[i].offX = cx - gx; links[i].offY = cy - gy; links[i].keepOffset = true;   // animation around the target kept
+        blobs[i].depthM = tz / g_worldScale;
+    }
     bool useCache = g_targetActor && !octCache.empty() && octWorldW > 0;
     if (useCache) {
         if (oct >= 0) { for (int i = oct; i < nb - 1; i++) { blobs[i] = blobs[i + 1]; links[i] = links[i + 1]; } nb--; }   // replace the game's
