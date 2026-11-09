@@ -391,6 +391,60 @@ static void CreateActions() {
 
 // ---------------------------------------------------------------- menu pointer (outside flight)
 static Swap beamSc; static bool beamReady;
+static HWND GameWnd();
+// Message panel shown instead of the (frozen) game while a desktop tool of the game is open (p2den's Alt+J joystick setup)
+static Swap msgSc[2]; static bool msgReady[2]; static const int MSG_W = 1280, MSG_H = 200;
+static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt
+void Vr_ShowMessage(int which) { InterlockedExchange(&s_msgShow, which); }
+static void MakeMessage(int slot, const char* text) {
+    Swap& sw = msgSc[slot];
+    if (!MakeSwap(sw, MSG_W, MSG_H)) return;
+    HDC dc = CreateCompatibleDC(nullptr);
+    BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = MSG_W; bi.bmiHeader.biHeight = -MSG_H;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr; HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!bmp) { DeleteDC(dc); return; }
+    HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    RECT r = {0, 0, MSG_W, MSG_H}; HBRUSH bg = CreateSolidBrush(RGB(16, 22, 30)); FillRect(dc, &r, bg); DeleteObject(bg);
+    HFONT font = CreateFontA(56, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(120, 200, 255));
+    RECT m = {24, 0, MSG_W - 24, MSG_H}; DrawTextA(dc, text, -1, &m, DT_CENTER | DT_WORDBREAK | DT_CALCRECT);   // centre (multi-line)
+    int th = m.bottom - m.top; RECT t = {24, (MSG_H - th) / 2, MSG_W - 24, (MSG_H - th) / 2 + th};
+    DrawTextA(dc, text, -1, &t, DT_CENTER | DT_WORDBREAK);
+    GdiFlush();
+    std::vector<uint8_t> px((size_t)MSG_W * MSG_H * 4); const uint8_t* src = (const uint8_t*)bits;
+    for (size_t k = 0; k < (size_t)MSG_W * MSG_H; k++) {   // GDI BGRX -> RGBA (sRGB swapchain), opaque panel
+        bool rgba = scFormat == (int64_t)DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        px[k*4] = rgba ? src[k*4+2] : src[k*4]; px[k*4+1] = src[k*4+1]; px[k*4+2] = rgba ? src[k*4] : src[k*4+2]; px[k*4+3] = 255;
+    }
+    SelectObject(dc, oldFont); DeleteObject(font); SelectObject(dc, oldBmp); DeleteObject(bmp); DeleteDC(dc);
+    uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (XR_FAILED(xrAcquireSwapchainImage(sw.sc, &ai, &i))) return;
+    XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; wi.timeout = XR_INFINITE_DURATION; xrWaitSwapchainImage(sw.sc, &wi);
+    ID3D11Resource* res = nullptr; sw.rtv[i]->GetResource(&res);
+    if (res) { ctx->UpdateSubresource(res, 0, nullptr, px.data(), MSG_W * 4, 0); res->Release(); }
+    XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO}; xrReleaseSwapchainImage(sw.sc, &ri);
+    msgReady[slot] = true;
+}
+// another visible window of the game process (besides the main game window): a desktop tool is open
+static bool DesktopToolOpen() {
+    static DWORD lastCheck; static bool open;
+    if (GetTickCount() - lastCheck < 250) return open;
+    lastCheck = GetTickCount();
+    struct F { HWND game; HWND tool; } f = {GameWnd(), nullptr};
+    EnumWindows([](HWND w, LPARAM lp) -> BOOL {
+        F* f = (F*)lp; DWORD pid; GetWindowThreadProcessId(w, &pid);
+        if (pid != GetCurrentProcessId() || w == f->game || !IsWindowVisible(w) || IsIconic(w)) return TRUE;
+        RECT r; GetWindowRect(w, &r); if (r.right - r.left < 100 || r.bottom - r.top < 100) return TRUE;
+        f->tool = w; return FALSE;
+    }, (LPARAM)&f);
+    bool now = f.tool != nullptr;
+    if (now != open) {
+        char cls[64] = "", title[128] = ""; if (f.tool) { GetClassNameA(f.tool, cls, sizeof cls); GetWindowTextA(f.tool, title, sizeof title); }
+        Log("[vr] desktop tool window %s %s %s", now ? "open:" : "closed", cls, title);
+    }
+    open = now; return open;
+}
 static bool s_ptrHit; static XrVector3f s_ptrFrom, s_ptrTo; static bool s_clickWas, s_rclickWas;
 static HWND GameWnd() {
     struct F { HWND best; LONG area; } f = {nullptr, 0};
@@ -407,7 +461,11 @@ static void MouseButton(DWORD flag) { INPUT in = {}; in.type = INPUT_MOUSE; in.m
 // Ray from the right controller onto the virtual screen -> move the real mouse there; trigger/grip = clicks.
 static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW, float screenY) {
     s_ptrHit = false;
-    if (flight || !s_actionsReady || !s_aimSpace) { s_clickWas = s_rclickWas = false; return; }
+    if (s_actionsReady && Macro_Replaying()) {   // replay: no VR pointer/clicks; the Esc action stops the replay
+        XrActionStateGetInfo gi = {XR_TYPE_ACTION_STATE_GET_INFO}; XrActionStateBoolean b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actEsc;
+        if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState) Macro_Abort("VR Esc pressed");
+    }
+    if (flight || !s_actionsReady || !s_aimSpace || Macro_Replaying()) { s_clickWas = s_rclickWas = false; return; }
     XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
     if (XR_FAILED(xrLocateSpace(s_aimSpace, localSpace, t, &loc)) ||
         !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) || !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) return;
@@ -515,6 +573,11 @@ static void PollControls(bool focused) {
             for (int i = 0; i < kVrCommandCount; i++) {
                 b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actBtn[i];
                 if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive) { any = true; if (b.currentState) c.buttons |= 1ull << i; }
+            }
+            c.anyButton = c.buttons != 0;
+            for (XrAction a : {s_actClick, s_actRClick, s_actEsc}) {
+                b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = a;
+                if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState) c.anyButton = true;
             }
             b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actRecenter;
             if (XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState && b.changedSinceLastSync) Vr_RequestRecenter();
@@ -631,6 +694,8 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     if (!MakeSwap(quadSc, HUD_PX_W + s_retPx, HUD_PX_H)) return false;   // [ HUD | crosshair crop ]
     if (!MakeSwap(markSc, 5120, 960)) return false;   // 4 x 640x480 at 2x: markers | lead | octagon | lock reticle
     if (s_panelsOn && !MakeSwap(panelSc, HUD_PX_W, HUD_PX_H)) s_panelsOn = false;
+    MakeMessage(0, "Use the desktop to configure the joystick");
+    MakeMessage(1, "Entering Space in VR.\nPress the fire button to continue");
     if (MakeSwap(beamSc, 8, 64)) {   // beam colour (premultiplied, semi-transparent cyan)
         uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         if (XR_SUCCEEDED(xrAcquireSwapchainImage(beamSc.sc, &ai, &i))) {
@@ -936,7 +1001,9 @@ static void FrameLoop() {
         XrCompositionLayerQuad reticle = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad beam = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad tip = {XR_TYPE_COMPOSITION_LAYER_QUAD};
-        if (targetDone && sessState == XR_SESSION_STATE_FOCUSED) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
+        bool toolOpen = targetDone && DesktopToolOpen();
+        int msgSlot = toolOpen ? 0 : (targetDone && s_msgShow == 1) ? 1 : -1;
+        if (targetDone && sessState == XR_SESSION_STATE_FOCUSED && msgSlot < 0) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
         else s_ptrHit = false;
         XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[8];
         if (fs.shouldRender && targetDone) {
@@ -1044,6 +1111,14 @@ static void FrameLoop() {
                 tip.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 layers.push_back((XrCompositionLayerBaseHeader*)&tip);
             }
+        }
+        XrCompositionLayerQuad msg = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (msgSlot >= 0 && msgReady[msgSlot]) {   // game frozen (desktop tool) or waiting (entering space): world-fixed message only
+            layers.clear();
+            msg.space = localSpace; msg.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            msg.subImage.swapchain = msgSc[msgSlot].sc; msg.subImage.imageRect = {{0, 0}, {MSG_W, MSG_H}};
+            msg.size = {1.3f, 1.3f * MSG_H / MSG_W}; msg.pose = {{0, 0, 0, 1}, {0, 0, -1.5f}};
+            layers.push_back((XrCompositionLayerBaseHeader*)&msg);
         }
         XrFrameEndInfo fei = {XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime; fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;

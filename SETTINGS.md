@@ -23,6 +23,7 @@
 | `EYE_SCALE` | `1.0` | Multiplier on SteamVR's recommended per-eye resolution. |
 | `EYE_MAX` | `2048` | Largest per-eye render size in pixels (clamped 512..8192). BRender's original 2048 limit is lifted in the engine, so higher values work. The template uses `4096`. |
 | `WINDOW_MAXIMIZE` | `1` | Maximise the game window at start. p2den renders the 2D layer (HUD, menus, films) at the window's size and p2vr shows that image in VR, so a bigger window makes them sharper. On a 3440×1440 monitor this gives 1825×1369 for the game's 4:3 picture instead of ~1060×797. Fullscreen (`WINDOWED=0` in p2den's settings) does not help: p2den then renders at 640×480. |
+| `SPACE_PROMPT` | `1` | When a mission starts (launch into space), the game is held on its first flight frame and the headset shows "Entering Space in VR. Press the fire button to continue" (world-fixed, 1.5 m ahead). The fire button continues, on release, so the press does not also fire: the VR `fire_guns` action (right trigger by default), the mouse button(s) p2den maps to fire in space (`[MOUSE_SPACE]` `BUTTON_0n=119` in `p2_dark_en_ingame.ini`, left button by default), or the joystick button(s) mapped to *fire guns* in p2den's Alt+J tool (code `0x72` in `controllers\<vid><pid>_*.joy`; without such a mapping, joystick button 1 as in the original game). Not shown when returning from the nav map, options or other screens opened during flight. Only while the VR session is running. `0` = start flying immediately. |
 | `SMOOTH` | `1` | Frame smoothing between the game's ~30 Hz simulation steps and the headset's refresh rate. `0` = off (judder at 30 Hz). `1` = interpolate (smooth, about one game frame of delay). `2` = extrapolate (no delay, may overshoot). |
 | `OBSERVER_BACK` | `1.0` | The eyes sit this far behind the ship's centre, so no object can come between you and the HUD plane. |
 | `SHOW_OWN_SHIP` | `0` | Draw your own ship's model (visible from behind once `OBSERVER_BACK` > 0). |
@@ -46,13 +47,14 @@ The game's 2D HUD (radar, gauges, VDUs) is shown on a flat panel in front of you
 |---|---|---|
 | `RETICLE_GLASS` | `1` | Draw the gun crosshair on the HUD glass (the HUD panel plane) with `RETICLE_GLASS_ALPHA` opacity. Takes precedence over `RETICLE_IN_EYES`. |
 | `RETICLE_GLASS_ALPHA` | `0.7` | Crosshair opacity on the glass (0..1). |
+| `HUD_ARROW_LAYER` | `1` | The yellow target-direction arrow (the triangle the HUD draws around the crosshair, pointing to the target) is not drawn into the HUD image but redrawn by p2vr as its own layer on the HUD glass, together with the other direction arrows. It is never cut by the HUD panels (`HUD_PANELS`) or the screen edge and passes behind the panels. It follows one game frame (1/30 s) later than the HUD. `0` = leave it in the HUD image. |
 | `RETICLE_IN_EYES` | `1` | Used when `RETICLE_GLASS=0`. `1` = draw the crosshair into the 3D image at infinity, so nearer ships cover it. `0` = separate layer on top. |
 | `RETICLE_DIST` | `30` | Crosshair distance on the ship's boresight when it is not on the glass. `500` ≈ optical infinity, like a real HUD. `0` = keep it in the HUD panel. The template uses `500`. |
 | `RETICLE_MIN_DIST` | `1.5` | Closest the crosshair/marker plane may come. |
 | `RETICLE_DYNAMIC` | `0` | Experimental: move the crosshair to the depth of whatever is under it. |
 | `RETICLE_SIZE` | `0.20` | Size of the crosshair region as a fraction of the HUD width. It must contain the whole crosshair cluster, including the pitch/yaw ladders. |
 
-The target bracket (octagon) and the lead indicator are always placed at the 3D position and depth of the targeted object. Direction arrows stay on the HUD plane. The markers are never clipped at the edge of the original screen.
+The target bracket (octagon) and the lead indicator are always placed at the 3D position and depth of the targeted object. Direction arrows (including the HUD's target-direction arrow, see `HUD_ARROW_LAYER`) are separate layers on the HUD plane, drawn behind the HUD panels. The markers are never clipped at the edge of the original screen.
 
 ## HUD panels
 
@@ -136,6 +138,7 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 | `INVERT_ROLL` | `0` | Invert the roll direction. |
 | `ROLL_GAIN` | `2.5` | Roll rate multiplier. |
 | `THROTTLE_RATE` | `0.6` | Throttle change per second at full left-stick deflection (0..1 of max speed per second). The throttle follows the game's own setting until you move the stick. |
+| `JOYSTICK_PASSTHROUGH` | `1` | Use a joystick / HOTAS together with the VR controllers. Requires the game's control method to be set to *Joystick* (or *Joystick + throttle*) in the game options; the joystick's axes and buttons are configured with p2den's in-game tool (**Alt+J**). Each axis (pitch, yaw, roll) is then only taken from the VR thumbsticks while they are deflected; otherwise the joystick's value is used. The throttle follows the joystick unless the VR throttle stick is moved. In mouse mode nothing changes (the VR sticks always drive the ship, so a parked mouse cannot cause drift). `0` = VR sticks always override. |
 | `KEY_<COMMAND>` | per command | Override the game key a command presses, as a DirectInput scancode in decimal. `<COMMAND>` is the action name in upper case, e.g. `KEY_FIRE_GUNS=57` (Space), `KEY_JUMP=36` (J). Commands flagged with Alt in `commands.h` keep their Alt modifier. |
 
 ## Controller rumble
@@ -152,7 +155,7 @@ The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so 
 
 | Setting | Default | Effect |
 |---|---|---|
-| `AUTOPLAY` | `0` | Replay `macro.txt` at game start (e.g. menus → into space). Real input is blocked during the replay. The replay pauses while the game window is not focused. |
+| `AUTOPLAY` | `0` | Replay `macro.txt` at game start (e.g. menus → into space). Real input is blocked during the replay, including the VR controllers (pointer, clicks, buttons, sticks). Pressing **Esc** (keyboard, or the VR Esc button) stops the replay: it means the sequence went wrong. The replay pauses while the game window is not focused. |
 | `AUTORECORD` | `0` | Start recording an input macro at game start. Ctrl+F2 stops and saves to `macro.txt`. |
 
 ## Diagnostics and spike tools

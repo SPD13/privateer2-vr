@@ -161,6 +161,7 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             } else StartReplay();
             return 1;   // swallow the hotkey
         }
+        if (s_replaying && !injected && !up && k->vkCode == VK_ESCAPE) { Macro_Abort("Esc pressed"); return 1; }
         // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
         if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
@@ -219,6 +220,12 @@ static DWORD WINAPI HookThread(LPVOID autoplay) {
     return 0;
 }
 
+bool Macro_Replaying() { return s_replaying; }
+// Esc pressed by the player (keyboard or VR controller) while a replay runs: the sequence went wrong -> stop it
+void Macro_Abort(const char* why) {
+    if (!s_replaying || s_abort) return;
+    s_abort = true; Log("[macro] replay stopped: %s (the sequence failed)", why);
+}   // VR input (pointer, clicks, buttons) is held back meanwhile
 void Macro_Start(const char* dir, bool autoplay, LogFn log) {
     Log = log;
     char ini[MAX_PATH]; sprintf_s(ini, "%s\\p2vr.ini", dir); s_autoRecord = GetPrivateProfileIntA("VR", "AUTORECORD", 0, ini) != 0;

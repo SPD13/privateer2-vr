@@ -9,6 +9,7 @@
 //   2 = PoC B: stereo - main frame rendered as left eye, right eye re-rendered in the same frame
 //       into private buffers; F9 dumps both eyes as BMP.
 #include <windows.h>
+#include <mmsystem.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
@@ -107,7 +108,8 @@ static bool  g_ctlEnable = true;
 static float g_rollGain = 2.5f, g_yawGain = 1.0f, g_pitchGain = 1.0f, g_throttleRate = 0.6f;
 static bool  g_invertPitch = false, g_invertRoll = false;
 static uint8_t g_keyFor[kVrCommandCount]; static bool g_altFor[kVrCommandCount];   // game key per command (scancode, +Alt)
-static volatile bool g_rollActive; static volatile float g_rollValue;           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
+static volatile bool g_rollActive; static volatile float g_rollValue;
+static bool g_joyPass = true; static volatile bool g_pitchOn = true, g_yawOn = true, g_rollOn = true;   // JOYSTICK_PASSTHROUGH           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
 static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
 bool Capture_GetPalette(uint8_t out[1024]);
@@ -647,9 +649,21 @@ extern "C" void __cdecl RecordSprite(int id, int x, int y) {
 struct MkLine { int x0, y0, x1, y1, colour; };
 static MkLine g_lockLines[128]; static int g_nLockLines; static bool g_recLines;
 struct PushadFrame { uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax, ret, y1, colour; };
-extern "C" void __cdecl RecordLine(PushadFrame* f) {
-    if (!g_recLines || f->ret < 0x453580 || f->ret >= 0x453b00 || g_nLockLines >= 128) return;
+// Target-direction triangle: drawn by the HUD routine FUN_00454b5c (3 lines, colour 0x2f / 0x6f, calls returning to
+// 0x45689e / 0x4568e0 / 0x456917), i.e. into the HUD image, where the HUD panel cut-outs would slice it. With
+// HUD_ARROW_LAYER these lines are not drawn by the game; p2vr redraws them into the direction-arrow layer (own quads on the
+// HUD glass, below the panels) with the next marker set (one game frame later).
+static bool g_hudArrowLayer = true;
+static MkLine g_hudArrow[8], g_hudArrowPrev[8]; static int g_nHudArrow, g_nHudArrowPrev;
+extern "C" int __cdecl RecordLine(PushadFrame* f) {
+    if (f->ret == 0x45689e || f->ret == 0x4568e0 || f->ret == 0x456917) {
+        if (!g_hudArrowLayer || !Vr_Active()) return 0;
+        if (g_nHudArrow < 8) g_hudArrow[g_nHudArrow++] = {(int)f->edx, (int)f->ebx, (int)f->ecx, (int)f->y1, (int)(f->colour & 0xff)};
+        return 1;                                                // skip the game's drawing
+    }
+    if (!g_recLines || f->ret < 0x453580 || f->ret >= 0x453b00 || g_nLockLines >= 128) return 0;
     g_lockLines[g_nLockLines++] = {(int)f->edx, (int)f->ebx, (int)f->ecx, (int)f->y1, (int)(f->colour & 0xff)};
+    return 0;
 }
 static uintptr_t g_lineCont = 0x4661a0 + 7;
 __declspec(naked) static void HookLine() {
@@ -658,12 +672,16 @@ __declspec(naked) static void HookLine() {
         push esp
         call RecordLine
         add esp, 4
-        popad
+        test eax, eax
+        popad                       // (flags kept)
+        jnz skip
         push esi
         push edi
         push ebp
         mov esi, dword ptr [esp + 0x20]
         jmp dword ptr [g_lineCont]
+    skip:
+        ret 0x14                    // FUN_004661a0 pops its 5 stack arguments
     }
 }
 static void DrawLine(uint8_t* img, int w, int h, int x0, int y0, int x1, int y1, uint8_t c, int brush) {
@@ -675,7 +693,10 @@ static void DrawLine(uint8_t* img, int w, int h, int x0, int y0, int x1, int y1,
         int e2 = 2 * err; if (e2 >= dy) { err += dy; x0 += sx; } if (e2 <= dx) { err += dx; y0 += sy; }
     }
 }
-extern "C" void __cdecl PreMarkers() { g_nPips = 0; g_nLockLines = 0; g_recLines = true; }
+extern "C" void __cdecl PreMarkers() {
+    g_nPips = 0; g_nLockLines = 0; g_recLines = true;
+    memcpy(g_hudArrowPrev, g_hudArrow, sizeof g_hudArrow); g_nHudArrowPrev = g_nHudArrow; g_nHudArrow = 0;   // last HUD pass
+}
 
 // low-res depth pass through the game camera (see HudFovDepth)
 static std::vector<uint8_t> g_dpC, g_dpD; static float g_dpHither = 1, g_dpYon = 1024; static bool g_dpValid;
@@ -814,6 +835,8 @@ extern "C" void __cdecl PostMarkers() {
     // a ship's bracket can never merge with it: their pixels go to the lead-indicator layer and they stay on the HUD glass.
     static std::vector<uint8_t> arrowImg; arrowImg.assign((size_t)w * h, 0); bool anyArrow = false;
     for (size_t k = 0; k < (size_t)w * h; k++) if ((mk[k] >> 4) == (ARROW_COLOUR >> 4)) { arrowImg[k] = mk[k]; mk[k] = 0; anyArrow = true; }
+    if (w == 640 && h == 480) for (int i = 0; i < g_nHudArrowPrev; i++) {   // the HUD's target-direction triangle (not clipped)
+        const MkLine& l = g_hudArrowPrev[i]; DrawLine(arrowImg.data(), w, h, l.x0, l.y0, l.x1, l.y1, (uint8_t)l.colour, 0); anyArrow = true; }
     int nm = FindMarkerBlobs(mk.data(), w, h, blobs + nb, 10 - nb);
     nb += nm;
     MarkerLink links[10] = {};
@@ -1363,7 +1386,7 @@ static void ReleaseVrKeys() {
 // Once per game cycle (game thread): compute the values the roll-write hook puts into the flight controls.
 static void UpdateControlMode() {
     VrControls c = {};
-    bool on = g_ctlEnable && g_vrEnable && Vr_Active() && Vr_GetControls(&c) && g_game;
+    bool on = g_ctlEnable && g_vrEnable && Vr_Active() && !Macro_Replaying() && Vr_GetControls(&c) && g_game;   // replay: VR controls off
     if (on != g_ctlOn) { Log("[ctl] VR flight controls %s", on ? "on" : "off"); if (!on) { ReleaseVrKeys(); g_rollActive = false; g_speedActive = false; } }
     g_ctlOn = on;
     if (!on) return;
@@ -1375,6 +1398,11 @@ static void UpdateControlMode() {
     g_yawValue   = -c.yaw * g_yawGain;
     g_rollValue  = -c.roll * g_rollGain * (g_invertRoll ? -1.f : 1.f);
     g_rollActive = true;
+    // Joystick pass-through: with the game's control method set to joystick (0x52e062 low bits 1 or 2), an axis is only
+    // overridden while its VR stick is deflected, so a joystick configured in p2den (Alt+J) keeps working alongside.
+    bool pass = g_joyPass && (*(uint8_t*)ADDR_CTRL_METHOD & 3) != 0;
+    g_pitchOn = !pass || c.pitch != 0; g_yawOn = !pass || c.yaw != 0; g_rollOn = !pass || c.roll != 0;
+    {   static int lastPass = -1; if ((int)pass != lastPass) { lastPass = pass; Log("[ctl] joystick pass-through %s (control method %d)", pass ? "on" : "off", *(uint8_t*)ADDR_CTRL_METHOD & 3); } }
     // throttle: follow the game's setting unless the throttle stick / speed-zero is used
     if (maxSpd > 0 && c.throttleRate != 0) {   // (speed keys like "speed to zero" are the game's own commands)
         if (!g_speedActive) { g_throttle = *(float*)(entry + 0x1298) / maxSpd; }
@@ -1391,6 +1419,79 @@ static void UpdateControlMode() {
     g_prevButtons = front ? c.buttons : 0;
 }
 extern "C" void __cdecl ApplyStick() {}
+
+// "Entering Space in VR" prompt: on the first flight frame after a flat scene, the game thread waits (window kept
+// responsive) until the fire button is pressed and released, so the space scene starts only when the player is ready.
+// Fire = the VR "fire_guns" action, the mouse button(s) p2den maps to fire in space ([MOUSE_SPACE] BUTTON_0n=119 in
+// p2_dark_en_ingame.ini), or the joystick button(s) p2den maps to fire guns (code 0x72 in the device's
+// controllers\<vid><pid>_*.joy; without a mapping the game's own joystick handling fires with button 1).
+static bool g_spacePrompt = true;
+// FUN_00438137 is a whole space session (launch -> flight loop incl. nav map / options -> landing or quit). Its two call
+// sites (0x41c0e2: launch from a base, 0x4227bb: other entry) go through SpaceSessionThunk, which flags a new mission.
+static volatile bool g_newSpaceSession;
+static const uintptr_t ADDR_SPACE_SESSION = 0x438137;
+static uintptr_t g_spaceSessionFn = ADDR_SPACE_SESSION;
+__declspec(naked) static void SpaceSessionThunk() {
+    __asm {
+        mov byte ptr [g_newSpaceSession], 1
+        jmp dword ptr [g_spaceSessionFn]
+    }
+}
+struct FireJoy { UINT id; DWORD mask; };
+static std::vector<FireJoy> g_fireJoys; static int g_fireMouse[5]; static bool g_fireMapsRead;
+static DWORD JoyFireMask(WORD vid, WORD pid) {   // p2den .joy: header 16 bytes (axis count at +12), 0x88 per axis,
+    char pat[MAX_PATH]; sprintf_s(pat, "%s\\controllers\\%04x%04x_*.joy", g_dir, vid, pid);   // then button count and
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd); DWORD mask = 0;                    // 5 tables of codes
+    if (h != INVALID_HANDLE_VALUE) {
+        FindClose(h);
+        char path[MAX_PATH]; sprintf_s(path, "%s\\controllers\\%s", g_dir, fd.cFileName);
+        FILE* f; if (!fopen_s(&f, path, "rb")) {
+            std::vector<uint8_t> d(64 * 1024); size_t n = fread(d.data(), 1, d.size(), f); fclose(f);
+            if (n >= 16 && !memcmp(&d[4], "P2DK", 4)) {
+                uint32_t na = *(uint32_t*)&d[12]; size_t o = 16 + (size_t)na * 0x88;
+                if (o + 4 <= n) { uint32_t nb = *(uint32_t*)&d[o];
+                    for (uint32_t k = 0; k < nb && k < 32 && o + 8 + 4 * k <= n; k++) if (*(uint32_t*)&d[o + 4 + 4 * k] == 0x72) mask |= 1u << k; }
+            }
+            Log("[vr] joystick %04x:%04x mapping %s: fire buttons %08x", vid, pid, fd.cFileName, mask);
+        }
+    }
+    return mask ? mask : 1u;   // unmapped: button 1
+}
+static void ReadFireMaps() {
+    g_fireMapsRead = true; g_fireJoys.clear();
+    char ini[MAX_PATH]; sprintf_s(ini, "%s\\p2_dark_en_ingame.ini", g_dir);
+    for (int i = 0; i < 5; i++) { char k[16]; sprintf_s(k, "BUTTON_%02d", i + 1); g_fireMouse[i] = GetPrivateProfileIntA("MOUSE_SPACE", k, i == 0 ? 119 : 0, ini) == 119; }
+    UINT n = joyGetNumDevs();
+    for (UINT j = 0; j < n && j < 16; j++) {
+        JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS}; if (joyGetPosEx(j, &ji) != JOYERR_NOERROR) continue;
+        JOYCAPSA jc = {}; if (joyGetDevCapsA(j, &jc, sizeof jc) != JOYERR_NOERROR) continue;
+        g_fireJoys.push_back({j, JoyFireMask(jc.wMid, jc.wPid)});
+    }
+    Log("[vr] fire buttons: mouse %d%d%d%d%d, %zu joystick(s)", g_fireMouse[0], g_fireMouse[1], g_fireMouse[2], g_fireMouse[3], g_fireMouse[4], g_fireJoys.size());
+}
+static bool FireDown() {
+    if (!g_fireMapsRead) ReadFireMaps();
+    static const int vks[5] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+    for (int i = 0; i < 5; i++) if (g_fireMouse[i] && (GetAsyncKeyState(vks[i]) & 0x8000)) return true;
+    VrControls c = {};
+    if (Vr_GetControls(&c)) for (int i = 0; i < kVrCommandCount; i++) if (!strcmp(kVrCommands[i].action, "fire_guns") && ((c.buttons >> i) & 1)) return true;
+    for (auto& fj : g_fireJoys) { JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS}; if (joyGetPosEx(fj.id, &ji) == JOYERR_NOERROR && (ji.dwButtons & fj.mask)) return true; }
+    return false;
+}
+static void WaitForSpacePrompt() {
+    Log("[vr] entering space: waiting for the fire button");
+    g_fireMapsRead = false;   // pick up joysticks / mappings changed since the last time
+    Vr_ShowMessage(1);
+    int phase = 0;   // 0: wait until nothing is held, 1: wait for a press, 2: wait for its release
+    while (phase < 3 && Vr_Active()) {
+        MSG m; PeekMessageA(&m, nullptr, 0, 0, PM_NOREMOVE);   // keeps the window responsive (no "not responding")
+        bool down = FireDown();
+        if (phase == 0 && !down) phase = 1; else if (phase == 1 && down) phase = 2; else if (phase == 2 && !down) phase = 3;
+        Sleep(15);
+    }
+    Vr_ShowMessage(0);
+    Log("[vr] entering space: continue");
+}
 
 // Rumble when the player's ship is hit: the HUD's shield/armour display reads four shield values (16.16 at entry+0x12dc,
 // stride 2 bytes, i.e. shorts at +0x12de..+0x12e4) and four armour values (shorts at +0x12e6..+0x12ec); maxima per ship
@@ -1530,6 +1631,7 @@ extern "C" void __cdecl PostEnd() {
     if (idx == 1) {
         g_frames++;
         Smooth_SetGameThread();
+        if (g_newSpaceSession) { g_newSpaceSession = false; if (g_spacePrompt && Vr_Active()) WaitForSpacePrompt(); }   // mission start only
         UpdateControlMode();
         CheckHits();
         g_lastFlightTick = GetTickCount();
@@ -1731,12 +1833,21 @@ __declspec(naked) static void HookRollWrite() {     // replaces "cmp byte ptr [0
         push edx
         mov eax, dword ptr [ebp + 0x2785c]
         imul eax, eax, 0x3a0
+        cmp byte ptr [g_rollOn], 0
+        je noroll
         mov edx, dword ptr [g_rollValue]
         mov dword ptr [eax + ebp + 0x12ac], edx
+    noroll:
+        cmp byte ptr [g_pitchOn], 0
+        je nopitch
         mov edx, dword ptr [g_pitchValue]
         mov dword ptr [eax + ebp + 0x12a8], edx
+    nopitch:
+        cmp byte ptr [g_yawOn], 0
+        je noyaw
         mov edx, dword ptr [g_yawValue]
         mov dword ptr [eax + ebp + 0x12b0], edx
+    noyaw:
         cmp byte ptr [g_speedActive], 0
         je nospeed
         mov edx, dword ptr [g_speedValue]
@@ -1833,6 +1944,19 @@ static void InstallHooks() {
     Log("hooks: sprites %d %d", h1, h2);
     static const uint8_t linePro[7] = {0x56, 0x57, 0x55, 0x8B, 0x74, 0x24, 0x20};   // push esi; push edi; push ebp; mov esi,[esp+0x20]
     Log("hooks: marker lines %d", WriteJmp(0x4661a0, (void*)HookLine, linePro, 7));
+    {   int ok = 0;   // space session entry: redirect both call sites through SpaceSessionThunk
+        for (uintptr_t site : {(uintptr_t)0x41c0e2, (uintptr_t)0x4227bb}) {
+            uint8_t* q = (uint8_t*)site;
+            if (q[0] != 0xE8) continue;
+            uintptr_t cur = site + 5 + *(int32_t*)(q + 1);           // p2den already wraps the session: chain to its wrapper
+            if (cur == (uintptr_t)SpaceSessionThunk) continue;
+            if (cur != ADDR_SPACE_SESSION) Log("hooks: space session call %08x already redirected to %08x (chained)", (unsigned)site, (unsigned)cur);
+            g_spaceSessionFn = cur;
+            DWORD old; VirtualProtect(q, 5, PAGE_EXECUTE_READWRITE, &old);
+            *(int32_t*)(q + 1) = (int32_t)((uintptr_t)SpaceSessionThunk - (site + 5));
+            VirtualProtect(q, 5, old, &old); FlushInstructionCache(GetCurrentProcess(), q, 5); ok++;
+        }
+        Log("hooks: space session entry %d/2", ok); }
     if (g_cursorFix) {   // PAD: background restore at pointer-1 (was +0x3b,+0x16), shadow at pointer+3 in the PAD view (was +3,+3)
         struct { uintptr_t at; uint8_t was, now; } pp[] = {{0x4363c8, 0x3b, 0xff}, {0x4363da, 0x16, 0xff}, {0x436481, 0x03, 0xec}, {0x436491, 0x03, 0xc7}};
         bool ok = true;
@@ -1887,6 +2011,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_spriteLog = GetPrivateProfileIntA("VR", "SPRITE_LOG", 0, p) != 0;
         g_cursorFix = GetPrivateProfileIntA("VR", "CURSOR_FIX", 1, p) != 0;
         g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
+        g_joyPass = GetPrivateProfileIntA("VR", "JOYSTICK_PASSTHROUGH", 1, p) != 0;
+        g_spacePrompt = GetPrivateProfileIntA("VR", "SPACE_PROMPT", 1, p) != 0;
+        g_hudArrowLayer = GetPrivateProfileIntA("VR", "HUD_ARROW_LAYER", 1, p) != 0;
         GetPrivateProfileStringA("VR", "RUMBLE_GUNS", "0.35", b, 32, p); g_rumbleGuns = (float)atof(b);
         GetPrivateProfileStringA("VR", "RUMBLE_HIT", "0.9", b, 32, p); g_rumbleHit = (float)atof(b);
         g_cursorId = GetPrivateProfileIntA("VR", "PAD_CURSOR_ID", -1, p);
