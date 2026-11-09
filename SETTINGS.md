@@ -22,6 +22,7 @@
 | `WORLD_SCALE` | `10` | Game units per metre. Scales head movement and eye separation. Higher = stronger depth / smaller-feeling world. |
 | `EYE_SCALE` | `1.0` | Multiplier on SteamVR's recommended per-eye resolution. |
 | `EYE_MAX` | `2048` | Largest per-eye render size in pixels (clamped 512..8192). BRender's original 2048 limit is lifted in the engine, so higher values work. The template uses `4096`. |
+| `WINDOW_MAXIMIZE` | `1` | Maximise the game window at start. p2den renders the 2D layer (HUD, menus, films) at the window's size and p2vr shows that image in VR, so a bigger window makes them sharper. On a 3440×1440 monitor this gives 1825×1369 for the game's 4:3 picture instead of ~1060×797. Fullscreen (`WINDOWED=0` in p2den's settings) does not help: p2den then renders at 640×480. |
 | `SMOOTH` | `1` | Frame smoothing between the game's ~30 Hz simulation steps and the headset's refresh rate. `0` = off (judder at 30 Hz). `1` = interpolate (smooth, about one game frame of delay). `2` = extrapolate (no delay, may overshoot). |
 | `OBSERVER_BACK` | `1.0` | The eyes sit this far behind the ship's centre, so no object can come between you and the HUD plane. |
 | `SHOW_OWN_SHIP` | `0` | Draw your own ship's model (visible from behind once `OBSERVER_BACK` > 0). |
@@ -80,18 +81,20 @@ PANEL_TARGET=2,342,120,478, -44,-22, 0.28
 
 At 0.8 m, 0.1 m of width covers about 7° of view; keep neighbouring panels' azimuths far enough apart so they don't overlap.
 
+Keep rectangles tight around their window: the HUD's direction arrows circle the crosshair at about 100 px (roughly x 220–420, y 140–340), and any part of an arrow inside a panel rectangle is shown on that panel, splitting the arrow between two places.
+
 Default panels (names are fixed; at most 8 panels):
 
 | Panel | HUD content | Default value |
 |---|---|---|
 | `PANEL_VELOCITY` | Velocity readout and bars (top centre) | `236,4,406,58, 0,24, 0.36` |
-| `PANEL_COMMS` | Comms window (top left) | `0,0,234,200, -34,22, 0.40` |
+| `PANEL_COMMS` | Comms window (top left) | `0,0,124,140, -34,22, 0.24` |
 | `PANEL_TARGET` | Target VDU (bottom left) | `2,342,120,478, -44,-22, 0.28` |
 | `PANEL_TARGET_SHIELDS` | Target's shield/armour ring (left of the radar) | `138,382,254,476, -22,-26, 0.24` |
 | `PANEL_RADAR` | Radar and the bars below it | `254,346,388,478, 0,-28, 0.30` |
 | `PANEL_SHIELDS` | Your own ship's shield/armour ring (right of the radar) | `388,382,504,476, 22,-26, 0.24` |
 | `PANEL_RIGHT` | Right VDU area (bottom right) | `504,342,640,478, 44,-22, 0.28` |
-| `PANEL_MISSILES` | Missile / gun VDW window (top right) | `406,0,640,200, 34,22, 0.40` |
+| `PANEL_MISSILES` | Missile / gun VDW window (top right) | `516,0,640,140, 34,22, 0.24` |
 
 A malformed value is ignored and reported in `p2vr.log` (`[vr] PANEL_... ignored`). Each panel is one OpenXR composition layer; if the runtime's layer limit (16 on SteamVR) is reached, target markers are dropped before panels.
 

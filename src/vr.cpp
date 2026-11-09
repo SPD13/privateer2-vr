@@ -34,7 +34,8 @@ static XrAction s_actAim, s_actClick, s_actRClick, s_actEsc; static XrSpace s_ai
 static bool s_frameExt;   // XR_VALVE_frame_controller_interaction enabled
 static XrAction s_actHaptic[2];                                     // vibration output, left / right hand
 static float s_hapAmp[2], s_hapDur[2]; static bool s_hapPending[2]; // requests from the game thread (under s_ctlCs)
-static int s_maxLayers = 16;                                        // runtime's composition layer limit
+static int s_maxLayers = 16;
+static bool s_maximize = true;   // WINDOW_MAXIMIZE: p2den renders at the window size, so a bigger window = sharper films/menus/HUD                                        // runtime's composition layer limit
 // HUD panels: rectangles of the 640x480 HUD shown as separate quads placed around the player (HUD_PANELS=1)
 struct HudPanel { char name[16]; float r[4]; float pos[3]; float yaw, pitch, width; };
 static HudPanel s_panels[8]; static int s_nPanels; static bool s_panelsOn;
@@ -894,6 +895,8 @@ static void FrameLoop() {
         XrFrameBeginInfo fbi = {XR_TYPE_FRAME_BEGIN_INFO}; xrBeginFrame(sess, &fbi);
         if (InterlockedExchange(&s_recenter, 0)) DoRecenter(fs.predictedDisplayTime);
         PollControls(sessState == XR_SESSION_STATE_FOCUSED);
+        {   static bool maximized;
+            if (s_maximize && !maximized) { HWND gw = GameWnd(); if (gw && IsWindowVisible(gw)) { ShowWindowAsync(gw, SW_MAXIMIZE); maximized = true; Log("[vr] game window maximized"); } } }
         ApplyHaptics(sessState == XR_SESSION_STATE_FOCUSED);
 
         XrViewLocateInfo vli = {XR_TYPE_VIEW_LOCATE_INFO};
@@ -1082,16 +1085,17 @@ void Vr_Start(const char* ini, LogFn log) {
     // HUD panels on a sphere around the seated head. PANEL_<NAME> = x0,y0,x1,y1 (HUD pixels, 640x480), azimuth (deg, + right),
     // elevation (deg, + up), width (m) [, radius (m)]. Each panel faces the centre of the sphere.
     s_panelsOn = IniF(ini, "HUD_PANELS", 1.0f) != 0;
+    s_maximize = IniF(ini, "WINDOW_MAXIMIZE", 1.0f) != 0;
     float radius = IniF(ini, "PANEL_RADIUS", 0.8f);
     static const char* kPanelDefaults[][2] = {
         {"VELOCITY",       "236,4,406,58,     0, 24, 0.36"},
-        {"COMMS",          "0,0,234,200,    -34, 22, 0.40"},
+        {"COMMS",          "0,0,124,140,    -34, 22, 0.24"},   // windows only: the direction arrows circle the crosshair at ~100 px
         {"TARGET",         "2,342,120,478,  -44,-22, 0.28"},
         {"TARGET_SHIELDS", "138,382,254,476,-22,-26, 0.24"},
         {"RADAR",          "254,346,388,478,  0,-28, 0.30"},
         {"SHIELDS",        "388,382,504,476, 22,-26, 0.24"},
         {"RIGHT",          "504,342,640,478, 44,-22, 0.28"},
-        {"MISSILES",       "406,0,640,200,   34, 22, 0.40"}};   // top right: missile / gun VDWs (max 8 panels)
+        {"MISSILES",       "516,0,640,140,   34, 22, 0.24"}};   // top right: missile / gun VDWs (max 8 panels)
     s_nPanels = 0;
     for (auto& d : kPanelDefaults) {
         char key[32], b[160]; sprintf_s(key, "PANEL_%s", d[0]);

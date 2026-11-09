@@ -51,7 +51,7 @@ static void BringGameToFront() {
 
 static void Save() {
     FILE* f; if (fopen_s(&f, s_path, "w")) return;
-    fprintf(f, "# p2vr input macro: time_s type a b c\n");
+    fprintf(f, "# p2vr input macro: time_s type a b c (P = pointer in the 4:3 game picture, 0..10000)\n");
     EnterCriticalSection(&s_cs);
     for (auto& e : s_rec) fprintf(f, "%.4f %c %d %d %d\n", e.t, e.type, e.a, e.b, e.c);
     LeaveCriticalSection(&s_cs);
@@ -67,6 +67,14 @@ static bool Load(std::vector<Ev>& out) {
     fclose(f); return !out.empty();
 }
 
+// Pointer positions: 'P' events are fractions (0..10000) of the game's 4:3 picture (pillarboxed in the centre of the
+// window), so a macro replays correctly at any window size or shape. Older 'M' events are fractions of the client area.
+static void PictureRect(HWND w, double* x, double* y, double* pw, double* ph) {
+    RECT r; GetClientRect(w, &r);
+    double cw = r.right, ch = r.bottom; *pw = ch * 4.0 / 3.0; *ph = ch;
+    if (*pw > cw) { *pw = cw; *ph = cw * 3.0 / 4.0; }
+    *x = (cw - *pw) * 0.5; *y = (ch - *ph) * 0.5;
+}
 static void Add(char type, int a, int b, int c) {
     EnterCriticalSection(&s_cs); s_rec.push_back({NowS(), type, a, b, c}); LeaveCriticalSection(&s_cs);
 }
@@ -98,9 +106,10 @@ static DWORD WINAPI ReplayThread(LPVOID) {
             in.type = INPUT_KEYBOARD; in.ki.wScan = (WORD)e.a;
             in.ki.dwFlags = KEYEVENTF_SCANCODE | ((e.b & 1) ? KEYEVENTF_KEYUP : 0) | ((e.b & 2) ? KEYEVENTF_EXTENDEDKEY : 0);
             if (e.a < 256) down[e.a] = !(e.b & 1);
-        } else if (e.type == 'M') {
+        } else if (e.type == 'M' || e.type == 'P') {
             HWND w = GameWindow(); if (!w) continue;
             RECT r; GetClientRect(w, &r); POINT p = {LONG(e.a / 10000.0 * r.right), LONG(e.b / 10000.0 * r.bottom)};
+            if (e.type == 'P') { double px, py, pw, ph; PictureRect(w, &px, &py, &pw, &ph); p = {LONG(px + e.a / 10000.0 * pw), LONG(py + e.b / 10000.0 * ph)}; }
             ClientToScreen(w, &p);
             int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
             int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
@@ -177,14 +186,14 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
                 double t = NowS();
                 if (w && t - s_lastMove > 0.015) {
                     s_lastMove = t;
-                    POINT p = m->pt; ScreenToClient(w, &p); RECT r; GetClientRect(w, &r);
-                    if (r.right > 0 && r.bottom > 0) Add('M', int(p.x * 10000.0 / r.right), int(p.y * 10000.0 / r.bottom), 0);
+                    POINT p = m->pt; ScreenToClient(w, &p); double px, py, pw, ph; PictureRect(w, &px, &py, &pw, &ph);
+                    if (pw > 0 && ph > 0) Add('P', int((p.x - px) * 10000.0 / pw), int((p.y - py) * 10000.0 / ph), 0);
                 }
             } else if (wp == WM_LBUTTONDOWN || wp == WM_LBUTTONUP || wp == WM_RBUTTONDOWN || wp == WM_RBUTTONUP ||
                        wp == WM_MBUTTONDOWN || wp == WM_MBUTTONUP) {
                 if (w) {   // make sure the pointer position right before a click is recorded
-                    POINT p = m->pt; ScreenToClient(w, &p); RECT r; GetClientRect(w, &r);
-                    if (r.right > 0 && r.bottom > 0) Add('M', int(p.x * 10000.0 / r.right), int(p.y * 10000.0 / r.bottom), 0);
+                    POINT p = m->pt; ScreenToClient(w, &p); double px, py, pw, ph; PictureRect(w, &px, &py, &pw, &ph);
+                    if (pw > 0 && ph > 0) Add('P', int((p.x - px) * 10000.0 / pw), int((p.y - py) * 10000.0 / ph), 0);
                 }
                 int btn = (wp == WM_LBUTTONDOWN || wp == WM_LBUTTONUP) ? 0 : (wp == WM_RBUTTONDOWN || wp == WM_RBUTTONUP) ? 1 : 2;
                 bool dn = wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN;
