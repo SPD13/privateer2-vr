@@ -297,6 +297,46 @@ static HRESULT STDMETHODCALLTYPE HkCreateTex2D(ID3D11Device* dev, const D3D11_TE
     return hr;
 }
 
+// Displayed HUD frame (what p2den shows), resampled to the game's 640x480 grid, RGB. Read back about once a second
+// through a 3-deep staging ring so it never stalls. Used to learn the true on-screen colours of HUD palette indices.
+static ID3D11Texture2D* gHudStage[3]; static UINT gHudStageW, gHudStageH; static uint32_t gHudFrame;
+static uint8_t gHudRGB[640 * 480 * 3]; static volatile LONG gHudRGBValid;
+static void ReadbackHud(ID3D11Device* dev, ID3D11DeviceContext* c) {
+    if (!gShared) return;
+    D3D11_TEXTURE2D_DESC sd; gShared->GetDesc(&sd);
+    if (!gHudStage[0] || gHudStageW != sd.Width || gHudStageH != sd.Height) {
+        for (auto& t : gHudStage) if (t) { t->Release(); t = nullptr; }
+        D3D11_TEXTURE2D_DESC d = sd; d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
+        for (auto& t : gHudStage) if (FAILED(dev->CreateTexture2D(&d, nullptr, &t))) return;
+        gHudStageW = sd.Width; gHudStageH = sd.Height; gHudFrame = 0;
+    }
+    uint32_t f = gHudFrame++;
+    if (f % 30 == 0) c->CopyResource(gHudStage[(f / 30) % 3], gShared);
+    if (f % 30 == 15 && f >= 75) {                            // the copy made two cycles earlier is ready by now
+        ID3D11Texture2D* rd = gHudStage[(f / 30 + 1) % 3];
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(c->Map(rd, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) {
+            bool bgr = sd.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+            float W = (float)sd.Width, H = (float)sd.Height, vw = H * 4.f / 3.f, vh = H;
+            if (vw > W) { vw = W; vh = W * 3.f / 4.f; }
+            float ox = (W - vw) * 0.5f, oy = (H - vh) * 0.5f;
+            for (int y = 0; y < 480; y++) {
+                int sy = (int)(oy + (y + 0.5f) * vh / 480.f); const uint8_t* row = (const uint8_t*)m.pData + (size_t)sy * m.RowPitch;
+                for (int x = 0; x < 640; x++) {
+                    int sx = (int)(ox + (x + 0.5f) * vw / 640.f); const uint8_t* px = row + sx * 4; uint8_t* o = gHudRGB + (y * 640 + x) * 3;
+                    o[0] = bgr ? px[2] : px[0]; o[1] = px[1]; o[2] = bgr ? px[0] : px[2];
+                }
+            }
+            c->Unmap(rd, 0);
+            InterlockedExchange(&gHudRGBValid, 1);
+        }
+    }
+}
+bool Capture_GetHudRGB(uint8_t* out) {   // 640*480*3
+    if (!gHudRGBValid) return false;
+    memcpy(out, gHudRGB, sizeof gHudRGB); return true;
+}
+
 bool Capture_GetPalette(uint8_t out[1024]) {
     if (!gPalValid) return false;
     EnterCriticalSection(&gPalCs); memcpy(out, gPal, 1024); LeaveCriticalSection(&gPalCs);
@@ -344,6 +384,7 @@ static void CaptureFrame(IDXGISwapChain* sc) {
         c->CopyResource(gShared, bb); c->Flush();
         Vr_SetScreenSource(gSharedHandle, gW, gH, ++gFrame);
         ReadbackPalette(dev, c);
+        ReadbackHud(dev, c);
         ComposeMirror(dev, c, bb, d);
     }
     c->Release(); dev->Release(); bb->Release();
@@ -443,8 +484,8 @@ static HRESULT WINAPI HkD3D11CreateDevice(IDXGIAdapter* a, D3D_DRIVER_TYPE dt, H
 }
 
 // Patch one import of a loaded module.
-static bool PatchImport(HMODULE mod, const char* dll, const char* func, void* hook, void** orig) {
-    uint8_t* b = (uint8_t*)mod;
+bool PatchImport(HMODULE mod, const char* dll, const char* func, void* hook, void** orig) {
+    uint8_t* b = (uint8_t*)mod; bool found = false;
     auto nt = (IMAGE_NT_HEADERS*)(b + ((IMAGE_DOS_HEADER*)b)->e_lfanew);
     auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(b + dir.VirtualAddress); imp->Name; imp++) {
@@ -456,12 +497,13 @@ static bool PatchImport(HMODULE mod, const char* dll, const char* func, void* ho
             auto ibn = (IMAGE_IMPORT_BY_NAME*)(b + names->u1.AddressOfData);
             if (strcmp((char*)ibn->Name, func)) continue;
             DWORD old; VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old);
-            *orig = (void*)iat->u1.Function; iat->u1.Function = (uintptr_t)hook;
+            if (!*orig) *orig = (void*)iat->u1.Function;
+            iat->u1.Function = (uintptr_t)hook;
             VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
-            return true;
+            found = true;
         }
     }
-    return false;
+    return found;
 }
 
 void Capture_Install(LogFn log) {

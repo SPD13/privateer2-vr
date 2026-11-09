@@ -13,3 +13,5 @@ notes/vcalls.txt
 # Raw capture dumps
 captures/run*/
 *.bmp
+captures/dumps_markers/
+*.bin

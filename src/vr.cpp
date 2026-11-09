@@ -32,7 +32,10 @@ static int   s_eyeMax = 2048;        // largest eye dimension (BRender's own che
 static float s_offQuat[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};   // per-eye rotation to the centre of its (asymmetric) fov
 static float s_hudDist = 1.0f, s_hudWidth = 1.5f, s_hudY = 0.0f;
 // Crosshair region of the HUD, shown as its own layer far out on the boresight so it lines up with the lasers.
-static float s_retDist = 30.0f;      // metres (game units = metres * WORLD_SCALE)
+static float s_retDist = 30.0f;      // metres (game units = metres * WORLD_SCALE): maximum crosshair distance
+static float s_retMin = 1.5f;        // closest the crosshair/marker plane may come
+static volatile float s_retWanted = 0;   // from the game thread: distance of what is under the crosshair
+static float s_retNow = 30.0f;       // smoothed distance actually used
 static float s_retFrac = 0.20f;      // size of the crosshair region as a fraction of the HUD width
 static const int HUD_PX_W = 1600, HUD_PX_H = 1200;
 static int s_retPx = 256;            // crosshair crop size in swapchain pixels
@@ -51,21 +54,35 @@ static VrEyeTarget s_target;
 static bool     s_targetValid;
 static LUID     s_luid;
 static volatile LONG s_recenter;
+static volatile LONG s_frameCounter;
 
 // eye buffers: [set][eye]; game writes s_back, VR thread uploads s_ready
-struct EyeSet { std::vector<uint8_t> px[2]; VrView views[2]; uint8_t pal[1024]; };
+struct EyeCh { bool on; float rows[9]; int bx0, by0, bx1, by1; float g[4]; std::vector<uint8_t> occ; };
+static const int MAX_BLOBS = 10;
+struct EyeSet { std::vector<uint8_t> px[2]; VrView views[2]; uint8_t pal[1024]; EyeCh ch[2];
+                bool mHave; uint32_t mSerial; float mPos[MAX_BLOBS][3], mSize[MAX_BLOBS][2]; uint8_t mValid[MAX_BLOBS]; };
 static EyeSet   s_sets[3];
 static int      s_back = 0, s_ready = -1, s_inUse = -1;
 static DWORD    s_lastEyeTick;
 
 // HUD markers (8-bit) from the game thread
 static std::vector<uint8_t> s_mk; static int s_mkW, s_mkH; static uint8_t s_mkPal[1024]; static bool s_mkNew;
+static VrMarkerBlob s_blobs[MAX_BLOBS], s_shownBlobs[MAX_BLOBS]; static int s_nBlobs, s_nShownBlobs;
+static float s_observerBack = 0;
+static bool  s_retInEyes = true;
+static bool  s_retGlass = true; static float s_glassAlpha = 0.5f;   // crosshair on the HUD glass, semi-transparent     // crosshair/lead indicator are drawn into the eye images (no quad layers)
+static uint32_t s_mkSerial, s_shownSerial; static DWORD s_mkSubmitTick;                       // marker image serials (submitted / on screen)
+// exact poses: for the marker set on screen, and for a newly submitted (pending) set
+static float s_mPos[MAX_BLOBS][3], s_mSize[MAX_BLOBS][2]; static uint8_t s_mValid[MAX_BLOBS];
+static float s_pPos[MAX_BLOBS][3], s_pSize[MAX_BLOBS][2]; static uint8_t s_pValid[MAX_BLOBS]; static bool s_pHave;
 static HANDLE   s_screenHandle; static int s_screenW, s_screenH; static uint32_t s_screenFrame;
 
 // ---------------------------------------------------------------- public API (game thread side)
 bool Vr_Active() { return s_active != 0; }
 LUID Vr_AdapterLuid() { return s_luid; }
 void Vr_RequestRecenter() { InterlockedExchange(&s_recenter, 1); }
+void Vr_SetReticleDistance(float m) { s_retWanted = m; }
+LONG Vr_FrameCounter() { return s_frameCounter; }
 
 bool Vr_GetViews(VrView v[2]) {
     EnterCriticalSection(&s_cs);
@@ -83,6 +100,15 @@ uint8_t* Vr_EyeBuffer(int eye) {
     if (s.px[eye].size() != n) s.px[eye].resize(n);
     return s.px[eye].data();
 }
+void Vr_SetEyeCrosshair(int e, const float rows[9], int bx0, int by0, int bx1, int by1, const uint8_t* occ,
+                        float gx0, float gy0, float gx1, float gy1) {
+    EyeCh& c = s_sets[s_back].ch[e];
+    c.on = occ != nullptr && bx1 >= bx0 && by1 >= by0;
+    if (!c.on) return;
+    memcpy(c.rows, rows, sizeof c.rows); c.bx0 = bx0; c.by0 = by0; c.bx1 = bx1; c.by1 = by1;
+    c.g[0] = gx0; c.g[1] = gy0; c.g[2] = gx1; c.g[3] = gy1;
+    c.occ.assign(occ, occ + (size_t)(bx1 - bx0 + 1) * (by1 - by0 + 1));
+}
 void Vr_SubmitEyes(const VrView used[2], const uint8_t pal[1024]) {
     EnterCriticalSection(&s_cs);
     EyeSet& s = s_sets[s_back];
@@ -92,10 +118,29 @@ void Vr_SubmitEyes(const VrView used[2], const uint8_t pal[1024]) {
     s_lastEyeTick = GetTickCount();
     LeaveCriticalSection(&s_cs);
 }
-void Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t pal[1024]) {
+void Vr_SetObserverBack(float m) { s_observerBack = m; }
+void Vr_SetMarkerPoses(uint32_t serial, const float (*pos)[3], const float (*size)[2], const uint8_t* valid, int n, bool withEyes) {
     EnterCriticalSection(&s_cs);
-    s_mk.assign(idx, idx + (size_t)w * h); s_mkW = w; s_mkH = h; memcpy(s_mkPal, pal, 1024); s_mkNew = true;
+    if (n > MAX_BLOBS) n = MAX_BLOBS;
+    if (withEyes) {                           // travels with the eye images rendered at the same moment
+        EyeSet& es = s_sets[s_back];
+        es.mHave = true; es.mSerial = serial;
+        memcpy(es.mPos, pos, sizeof(float) * 3 * n); memcpy(es.mSize, size, sizeof(float) * 2 * n);
+        memset(es.mValid, 0, sizeof es.mValid); memcpy(es.mValid, valid, n);
+    }
+    if (serial == s_mkSerial && s_mkNew) {    // pending set: keep until it is adopted
+        memcpy(s_pPos, pos, sizeof(float) * 3 * n); memcpy(s_pSize, size, sizeof(float) * 2 * n);
+        memset(s_pValid, 0, sizeof s_pValid); memcpy(s_pValid, valid, n); s_pHave = true;
+    }
     LeaveCriticalSection(&s_cs);
+}
+uint32_t Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t pal[1024], const VrMarkerBlob* blobs, int n) {
+    EnterCriticalSection(&s_cs);
+    uint32_t serial = ++s_mkSerial; s_mkSubmitTick = GetTickCount(); s_pHave = false;
+    s_mk.assign(idx, idx + (size_t)w * h); s_mkW = w; s_mkH = h; memcpy(s_mkPal, pal, 1024); s_mkNew = true;
+    s_nBlobs = n < MAX_BLOBS ? n : MAX_BLOBS; memcpy(s_blobs, blobs, sizeof(VrMarkerBlob) * s_nBlobs);
+    LeaveCriticalSection(&s_cs);
+    return serial;
 }
 void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     EnterCriticalSection(&s_cs);
@@ -110,23 +155,44 @@ static ID3D11Texture2D* mkTex; static ID3D11ShaderResourceView* mkSrv; static in
 static ID3D11Texture2D* mkPalTex; static ID3D11ShaderResourceView* mkPalSrv;
 static ID3D11Texture2D* idxTex[2]; static ID3D11ShaderResourceView* idxSrv[2];
 static ID3D11Texture2D* palTex; static ID3D11ShaderResourceView* palSrv;
-static ID3D11SamplerState* linSamp; static ID3D11Buffer* cbuf;
+static ID3D11SamplerState* linSamp; static ID3D11Buffer* cbuf; static ID3D11Buffer* cbufEye[2];
+static ID3D11Texture2D* occTex[2]; static ID3D11ShaderResourceView* occSrv[2]; static int occW[2], occH[2];
 static ID3D11Texture2D* scrTex; static ID3D11ShaderResourceView* scrSrv; static HANDLE scrOpened;
+static float s_uScale = 1.0f, s_uOff = 0.0f;   // crop of the (pillarboxed) p2den image to its 4:3 centre
 
 static const char* kShaders = R"(
 Texture2D<uint>   idx : register(t0);
 Texture2D<float4> pal : register(t1);
 Texture2D<float4> scr : register(t2);
 SamplerState      ls  : register(s0);
-cbuffer C : register(b0) { float keyGain; float keyOn; float uScale; float uOff; float keyThresh; float holeOn; float2 pad2;
+cbuffer C : register(b0) { float keyGain; float keyOn; float uScale; float uOff; float keyThresh; float holeOn; float holeAlpha; float pad2;
                            float4 map; float4 hole; };   // map: hud uv = map.xy + uv * map.zw ; hole: u0 v0 u1 v1
 struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };
 V vs(uint id : SV_VertexID) {
     V o; o.uv = float2((id << 1) & 2, id & 2); o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1); return o;
 }
+Texture2D<uint>   occ : register(t3);
+cbuffer E : register(b1) { float4 r0; float4 r1; float4 r2; float4 eye; float4 box; float4 grect; float4 crop; float4 flags; };
 float4 psIndex(V i) : SV_Target {
     uint c = idx.Load(int3(i.p.xy, 0));
-    return float4(pal.Load(int3(c, 0, 0)).rgb, 1);
+    float3 base = pal.Load(int3(c, 0, 0)).rgb;
+    // crosshair at infinity from p2den's displayed HUD (exact look), hidden where a ship covers it
+    if (flags.x > 0.5 && i.p.x >= box.x && i.p.x < box.z + 1 && i.p.y >= box.y && i.p.y < box.w + 1) {
+        if (occ.Load(int3(int2(i.p.xy) - int2(box.xy), 0)) == 0) {
+            float ex = (i.p.x - eye.x * 0.5) / eye.z, ey = -(i.p.y - eye.y * 0.5) / eye.w;
+            float3 d = r0.xyz * ex + r1.xyz * ey - r2.xyz;          // eye direction -> ship space
+            if (d.z < -1e-4) {
+                float gx = 320.0 + d.x / -d.z * 461.0357, gy = 240.0 - d.y / -d.z * 461.0357;
+                if (gx >= grect.x && gx < grect.z && gy >= grect.y && gy < grect.w) {
+                    float3 h = scr.Sample(ls, float2(crop.y + gx / 640.0 * crop.x, gy / 480.0)).rgb;
+                    float g = pow(max(h.r, max(h.g, h.b)), 1.0 / 2.2);
+                    float a = saturate((g - crop.z) * crop.w);
+                    base = lerp(base, h, a);
+                }
+            }
+        }
+    }
+    return float4(base, 1);
 }
 float4 psMarker(V i) : SV_Target {   // map.xy = index texture size; index 0 = transparent
     uint c = idx.Load(int3(min(int2(i.uv * map.xy), int2(map.xy) - 1), 0));
@@ -135,11 +201,13 @@ float4 psMarker(V i) : SV_Target {   // map.xy = index texture size; index 0 = t
 }
 float4 psScreen(V i) : SV_Target {
     float2 uv = map.xy + i.uv * map.zw;
-    if (holeOn > 0.5 && uv.x > hole.x && uv.x < hole.z && uv.y > hole.y && uv.y < hole.w) return 0;
+    bool inHole = holeOn > 0.5 && uv.x > hole.x && uv.x < hole.z && uv.y > hole.y && uv.y < hole.w;
+    if (inHole && holeAlpha <= 0.0) return 0;
     float3 c = scr.Sample(ls, float2(uOff + uv.x * uScale, uv.y)).rgb;
     // key on display (gamma) brightness: anything clearly above black is fully opaque
     float g = pow(max(c.r, max(c.g, c.b)), 1.0 / 2.2);
     float a = keyOn > 0.5 ? saturate((g - keyThresh) * keyGain) : 1.0;
+    if (inHole) { c *= holeAlpha; a *= holeAlpha; }   // crosshair on the glass: semi-transparent (premultiplied)
     return float4(c, a);   // premultiplied: black stays black
 }
 )";
@@ -166,6 +234,8 @@ static bool CompileShaders() {
     d3d->CreateSamplerState(&sd, &linSamp);
     D3D11_BUFFER_DESC bd = {64, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     d3d->CreateBuffer(&bd, nullptr, &cbuf);
+    D3D11_BUFFER_DESC be = {128, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    d3d->CreateBuffer(&be, nullptr, &cbufEye[0]); d3d->CreateBuffer(&be, nullptr, &cbufEye[1]);
     D3D11_TEXTURE2D_DESC td = {256, 1, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
     d3d->CreateTexture2D(&td, nullptr, &palTex); d3d->CreateShaderResourceView(palTex, nullptr, &palSrv);
     d3d->CreateTexture2D(&td, nullptr, &mkPalTex); d3d->CreateShaderResourceView(mkPalTex, nullptr, &mkPalSrv);
@@ -316,14 +386,13 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     }
     s_retPx = (int)(s_retFrac * HUD_PX_W + 0.5f); if (s_retPx < 16) s_retPx = 16; if (s_retPx > HUD_PX_H) s_retPx = HUD_PX_H;
     if (!MakeSwap(quadSc, HUD_PX_W + s_retPx, HUD_PX_H)) return false;   // [ HUD | crosshair crop ]
-    if (!MakeSwap(markSc, 1280, 960)) return false;                        // HUD markers, 2x the game resolution
+    if (!MakeSwap(markSc, 3840, 960)) return false;                        // [ markers | lead indicator | cached octagon ], 2x
     EnterCriticalSection(&s_cs);
     s_target.width = w; s_target.height = h; s_target.tanHalfH = tH; s_target.tanHalfV = tV; s_targetValid = true;
     LeaveCriticalSection(&s_cs);
     return true;
 }
 
-static float s_uScale = 1.0f, s_uOff = 0.0f;   // crop of the (pillarboxed) p2den image to its 4:3 centre
 static void DrawTo(Swap& s, ID3D11PixelShader* ps, ID3D11ShaderResourceView* const* srvs, float keyOn) {
     uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
     if (XR_FAILED(xrAcquireSwapchainImage(s.sc, &ai, &i))) return;
@@ -356,11 +425,13 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
     ctx->PSSetShaderResources(0, 3, srvs); ctx->PSSetSamplers(0, 1, &linSamp); ctx->PSSetConstantBuffers(0, 1, &cbuf);
     float hw = s_retPx / (2.0f * HUD_PX_W), hh = s_retPx / (2.0f * HUD_PX_H);   // crosshair region half-size in HUD uv
     // pass 1: whole HUD (hole over the crosshair region in flight)
-    float cb1[16] = {s_keyGain, flight ? 1.f : 0.f, s_uScale, s_uOff, s_keyThresh, flight ? 1.f : 0.f, 0, 0,
+    bool split = flight && s_retDist > 0 && !s_retGlass;   // separate crosshair layer (crop pass)
+    bool hole = flight && (s_retDist > 0 || s_retGlass);    // crosshair region on the panel: cut out, or semi-transparent
+    float cb1[16] = {s_keyGain, flight ? 1.f : 0.f, s_uScale, s_uOff, s_keyThresh, hole ? 1.f : 0.f, s_retGlass ? s_glassAlpha : 0.f, 0,
                      0, 0, 1, 1, 0.5f - hw, 0.5f - hh, 0.5f + hw, 0.5f + hh};
     ctx->UpdateSubresource(cbuf, 0, nullptr, cb1, 0, 0);
     D3D11_VIEWPORT vp1 = {0, 0, (float)HUD_PX_W, (float)HUD_PX_H, 0, 1}; ctx->RSSetViewports(1, &vp1); ctx->Draw(3, 0);
-    if (flight) {   // pass 2: crosshair crop
+    if (split) {    // pass 2: crosshair crop
         float cb2[16] = {s_keyGain, 1.f, s_uScale, s_uOff, s_keyThresh, 0, 0, 0,
                          0.5f - hw, 0.5f - hh, 2 * hw, 2 * hh, 0, 0, 0, 0};
         ctx->UpdateSubresource(cbuf, 0, nullptr, cb2, 0, 0);
@@ -373,6 +444,8 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
 static void UpdateMarkers() {
     EnterCriticalSection(&s_cs);
     if (!s_mkNew) { LeaveCriticalSection(&s_cs); return; }
+    // wait (briefly) until the exact 3D poses for this marker set have arrived, so markers never jump
+    if (!s_pHave && GetTickCount() - s_mkSubmitTick < 100) { LeaveCriticalSection(&s_cs); return; }
     s_mkNew = false;
     if (!mkTex || mkTexW != s_mkW || mkTexH != s_mkH) {
         if (mkSrv) mkSrv->Release(); if (mkTex) mkTex->Release(); mkTex = nullptr; mkSrv = nullptr;
@@ -387,6 +460,9 @@ static void UpdateMarkers() {
         ctx->Unmap(mkTex, 0);
     }
     ctx->UpdateSubresource(mkPalTex, 0, nullptr, s_mkPal, 1024, 0);
+    s_nShownBlobs = s_nBlobs; memcpy(s_shownBlobs, s_blobs, sizeof(VrMarkerBlob) * s_nBlobs); s_shownSerial = s_mkSerial;
+    memset(s_mValid, 0, sizeof s_mValid);
+    if (s_pHave) { memcpy(s_mPos, s_pPos, sizeof s_mPos); memcpy(s_mSize, s_pSize, sizeof s_mSize); memcpy(s_mValid, s_pValid, sizeof s_mValid); }
     LeaveCriticalSection(&s_cs);
     if (!mkSrv) return;
     Swap& sw = markSc;
@@ -414,6 +490,15 @@ static void UploadEyes() {
     if (set < 0) return;
     EyeSet& es = s_sets[set];
     int w = s_target.width, h = s_target.height;
+    EnterCriticalSection(&s_cs);
+    if (es.mHave && es.mSerial == s_shownSerial) {
+        memcpy(s_mPos, es.mPos, sizeof s_mPos); memcpy(s_mSize, es.mSize, sizeof s_mSize); memcpy(s_mValid, es.mValid, sizeof s_mValid);
+    }
+    if (es.mHave && es.mSerial == s_mkSerial && s_mkNew) {
+        memcpy(s_pPos, es.mPos, sizeof s_pPos); memcpy(s_pSize, es.mSize, sizeof s_pSize); memcpy(s_pValid, es.mValid, sizeof s_pValid); s_pHave = true;
+    }
+    es.mHave = false;
+    LeaveCriticalSection(&s_cs);
     for (int e = 0; e < 2; e++) {
         if (es.px[e].size() != (size_t)w * h) continue;
         D3D11_MAPPED_SUBRESOURCE m;
@@ -423,9 +508,40 @@ static void UploadEyes() {
         }
     }
     ctx->UpdateSubresource(palTex, 0, nullptr, es.pal, 1024, 0);
+    float eb[2][32] = {};
+    for (int e = 0; e < 2; e++) {
+        EyeCh& c = es.ch[e];
+        if (!c.on || !scrSrv) continue;
+        int bw = c.bx1 - c.bx0 + 1, bh = c.by1 - c.by0 + 1;
+        if (!occTex[e] || occW[e] < bw || occH[e] < bh) {
+            if (occSrv[e]) occSrv[e]->Release(); if (occTex[e]) occTex[e]->Release(); occTex[e] = nullptr; occSrv[e] = nullptr;
+            int nw = bw + 64, nh = bh + 64;
+            D3D11_TEXTURE2D_DESC td = {(UINT)nw, (UINT)nh, 1, 1, DXGI_FORMAT_R8_UINT, {1, 0}, D3D11_USAGE_DYNAMIC, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_WRITE};
+            if (FAILED(d3d->CreateTexture2D(&td, nullptr, &occTex[e]))) continue;
+            d3d->CreateShaderResourceView(occTex[e], nullptr, &occSrv[e]); occW[e] = nw; occH[e] = nh;
+        }
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (FAILED(ctx->Map(occTex[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) continue;
+        for (int y = 0; y < bh; y++) memcpy((uint8_t*)m.pData + y * m.RowPitch, c.occ.data() + (size_t)y * bw, bw);
+        ctx->Unmap(occTex[e], 0);
+        float* f = eb[e];
+        for (int r = 0; r < 3; r++) { f[r*4] = c.rows[r*3]; f[r*4+1] = c.rows[r*3+1]; f[r*4+2] = c.rows[r*3+2]; }
+        f[12] = (float)w; f[13] = (float)h; f[14] = (w * 0.5f) / s_target.tanHalfH; f[15] = (h * 0.5f) / s_target.tanHalfV;
+        f[16] = (float)c.bx0; f[17] = (float)c.by0; f[18] = (float)c.bx1; f[19] = (float)c.by1;
+        f[20] = c.g[0]; f[21] = c.g[1]; f[22] = c.g[2]; f[23] = c.g[3];
+        f[24] = s_uScale; f[25] = s_uOff; f[26] = s_keyThresh; f[27] = s_keyGain;
+        f[28] = 1.0f;
+    }
     shownViews[0] = es.views[0]; shownViews[1] = es.views[1];
     EnterCriticalSection(&s_cs); s_inUse = -1; LeaveCriticalSection(&s_cs);
-    for (int e = 0; e < 2; e++) { ID3D11ShaderResourceView* srvs[3] = {idxSrv[e], palSrv, nullptr}; DrawTo(eyeSc[e], psIndex, srvs, 0); }
+    for (int e = 0; e < 2; e++) {
+        ctx->UpdateSubresource(cbufEye[e], 0, nullptr, eb[e], 0, 0);
+        ctx->PSSetConstantBuffers(1, 1, &cbufEye[e]);
+        ID3D11ShaderResourceView* o = eb[e][28] > 0 ? occSrv[e] : nullptr;
+        ctx->PSSetShaderResources(3, 1, &o);
+        ID3D11ShaderResourceView* srvs[3] = {idxSrv[e], palSrv, eb[e][28] > 0 ? scrSrv : nullptr}; DrawTo(eyeSc[e], psIndex, srvs, 0);
+        ID3D11ShaderResourceView* n1 = nullptr; ctx->PSSetShaderResources(3, 1, &n1);
+    }
     haveEyeImage = true;
 }
 
@@ -515,16 +631,23 @@ static void FrameLoop() {
             }
             s_viewsValid = true;
             LeaveCriticalSection(&s_cs);
+            InterlockedIncrement(&s_frameCounter);
         }
         InterlockedExchange(&s_active, targetDone ? 1 : 0);
 
         bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300;
+        if (s_retDist > 0) {
+            float want = s_retWanted > 0 ? s_retWanted : s_retDist;
+            if (want > s_retDist) want = s_retDist; if (want < s_retMin) want = s_retMin;
+            float k = want < s_retNow ? 0.35f : 0.08f;          // per display frame, in log space
+            s_retNow = expf(logf(s_retNow) + (logf(want) - logf(s_retNow)) * k);
+        }
         std::vector<XrCompositionLayerBaseHeader*> layers;
         XrCompositionLayerProjection proj = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
         XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}, {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
         XrCompositionLayerQuad quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad reticle = {XR_TYPE_COMPOSITION_LAYER_QUAD};
-        XrCompositionLayerQuad marks = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        XrCompositionLayerQuad marks[MAX_BLOBS];
         if (fs.shouldRender && targetDone) {
             if (flight) { UploadEyes(); UpdateMarkers(); }
             UpdateScreen(flight);
@@ -538,13 +661,48 @@ static void FrameLoop() {
                 }
                 proj.space = localSpace; proj.viewCount = 2; proj.views = pv;
                 layers.push_back((XrCompositionLayerBaseHeader*)&proj);
+                // Each HUD marker is its own quad, placed in 3D where the game drew it (direction from the ship
+                // centre) at the distance of the object it marks, so the eyes fuse marker and target.
                 if (haveMarkers) {
-                    marks.space = localSpace; marks.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                    marks.subImage.swapchain = markSc.sc; marks.subImage.imageRect = {{0, 0}, {markSc.w, markSc.h}};
-                    marks.size = {2 * s_retDist * GAME_TAN_H, 2 * s_retDist * GAME_TAN_V};
-                    marks.pose = {{0, 0, 0, 1}, {0, 0, -s_retDist}};
-                    marks.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-                    layers.push_back((XrCompositionLayerBaseHeader*)&marks);
+                    float mPos[MAX_BLOBS][3], mSize[MAX_BLOBS][2]; uint8_t mValid[MAX_BLOBS] = {};
+                    EnterCriticalSection(&s_cs);
+                    memcpy(mPos, s_mPos, sizeof mPos); memcpy(mSize, s_mSize, sizeof mSize); memcpy(mValid, s_mValid, sizeof mValid);
+                    LeaveCriticalSection(&s_cs);
+                    const float K = 461.0357f, sc = (float)markSc.w / (s_mkW ? s_mkW : 640);
+                    float inf = s_retDist > 0 ? s_retDist : 500.0f;
+                    for (int b = 0; b < s_nShownBlobs; b++) {
+                        const VrMarkerBlob& bl = s_shownBlobs[b];
+                        int ox = bl.layer * 640;                                           // which third of the texture
+                        int x0 = (int)((bl.x0 + ox) * sc) - 2, y0 = (int)(bl.y0 * sc) - 2, x1 = (int)((bl.x1 + 1 + ox) * sc) + 2, y1 = (int)((bl.y1 + 1) * sc) + 2;
+                        int lo = (int)(ox * sc), hi = (int)((ox + 640) * sc);
+                        if (x0 < lo) x0 = lo; if (y0 < 0) y0 = 0; if (x1 > hi) x1 = hi; if (y1 > markSc.h) y1 = markSc.h;
+                        if (x1 <= x0 || y1 <= y0) continue;
+                        float d = bl.depthM > 0 ? bl.depthM : inf;
+                        float cx = (x0 + x1) * 0.5f / sc - ox, cy = (y0 + y1) * 0.5f / sc;     // centre in 640x480 pixels
+                        XrCompositionLayerQuad& q = marks[b]; q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+                        q.space = localSpace; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                        q.subImage.swapchain = markSc.sc; q.subImage.imageRect = {{x0, y0}, {x1 - x0, y1 - y0}};
+                        q.size = {(x1 - x0) / sc / K * d, (y1 - y0) / sc / K * d};
+                        q.pose = {{0, 0, 0, 1}, {(cx - 320.f) / K * d, -(cy - 240.f) / K * d, -d - s_observerBack}};
+                        if (bl.depthM == -2.0f) {   // not tied to an object (e.g. direction arrows): on the HUD glass
+                            float hd = s_hudDist;
+                            q.size = {(x1 - x0) / sc / K * hd, (y1 - y0) / sc / K * hd};
+                            q.pose = {{0, 0, 0, 1}, {(cx - 320.f) / K * hd, -(cy - 240.f) / K * hd + s_hudY, -hd}};
+                        }
+                        if (bl.layer == 2 && !mValid[b]) continue;          // cached octagon only exists attached to the target
+                        if (mValid[b]) {   // follows its object in the same (blended) state as the rendered eyes
+                            q.pose.position = {mPos[b][0], mPos[b][1], mPos[b][2]};
+                            // face the viewer (works all around, not only in front)
+                            float nx = -mPos[b][0], ny = -mPos[b][1], nz = -mPos[b][2], nl = sqrtf(nx*nx + ny*ny + nz*nz);
+                            if (nl > 1e-4f) { nx /= nl; ny /= nl; nz /= nl;
+                                // shortest rotation from +Z (quad normal) to n
+                                float qx = -ny, qy = nx, qz = 0, qw = 1 + nz, ql = sqrtf(qx*qx + qy*qy + qz*qz + qw*qw);
+                                if (ql > 1e-4f) q.pose.orientation = {qx / ql, qy / ql, qz / ql, qw / ql}; else q.pose.orientation = {0, 1, 0, 0}; }
+                            q.size = {mSize[b][0] * ((x1 - x0) / sc) / (bl.x1 - bl.x0 + 1 + (bl.layer ? 0 : 0)), mSize[b][1] * ((y1 - y0) / sc) / (bl.y1 - bl.y0 + 1)};
+                        }
+                        q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                        layers.push_back((XrCompositionLayerBaseHeader*)&q);
+                    }
                 }
             }
             if (haveScreen) {
@@ -555,12 +713,12 @@ static void FrameLoop() {
                 quad.pose = {{0, 0, 0, 1}, {0, flight ? s_hudY : 0.0f, -(flight ? s_hudDist : s_screenDist)}};
                 if (flight) quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                 layers.push_back((XrCompositionLayerBaseHeader*)&quad);
-                if (flight) {   // crosshair on the boresight, same apparent size as on the HUD panel
+                if (flight && s_retDist > 0 && !s_retInEyes && !s_retGlass) {   // crosshair on the boresight, same apparent size as on the HUD panel
                     reticle.space = localSpace; reticle.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                     reticle.subImage.swapchain = quadSc.sc; reticle.subImage.imageRect = {{HUD_PX_W, 0}, {s_retPx, s_retPx}};
-                    float side = 2 * s_retDist * GAME_TAN_H * ((float)s_retPx / HUD_PX_W);
+                    float side = 2 * s_retNow * GAME_TAN_H * ((float)s_retPx / HUD_PX_W);
                     reticle.size = {side, side};
-                    reticle.pose = {{0, 0, 0, 1}, {0, 0, -s_retDist}};
+                    reticle.pose = {{0, 0, 0, 1}, {0, 0, -s_retNow - s_observerBack}};
                     reticle.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                     layers.push_back((XrCompositionLayerBaseHeader*)&reticle);
                 }
@@ -595,8 +753,11 @@ void Vr_Start(const char* ini, LogFn log) {
     InitializeCriticalSection(&s_cs);
     s_eyeScale = IniF(ini, "EYE_SCALE", 1.0f);
     s_eyeMax = (int)IniF(ini, "EYE_MAX", 2048.0f); if (s_eyeMax < 512) s_eyeMax = 512; if (s_eyeMax > 8192) s_eyeMax = 8192;
-    s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 1.5f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
-    s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retFrac = IniF(ini, "RETICLE_SIZE", 0.20f);
+    s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 0.0f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
+    if (s_hudWidth <= 0) s_hudWidth = 2 * s_hudDist * GAME_TAN_H;   // auto: exactly the game's field of view
+    s_retInEyes = IniF(ini, "RETICLE_IN_EYES", 1.0f) != 0;
+    s_retGlass = IniF(ini, "RETICLE_GLASS", 1.0f) != 0; s_glassAlpha = IniF(ini, "RETICLE_GLASS_ALPHA", 0.5f);
+    s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retMin = IniF(ini, "RETICLE_MIN_DIST", 1.5f); s_retNow = s_retDist; s_retFrac = IniF(ini, "RETICLE_SIZE", 0.20f);
     s_screenDist = IniF(ini, "SCREEN_DIST", 2.5f); s_screenWidth = IniF(ini, "SCREEN_WIDTH", 3.2f);
     s_keyGain = IniF(ini, "HUD_KEY_GAIN", 40.0f); s_keyThresh = IniF(ini, "HUD_KEY_THRESHOLD", 0.03f);
     CreateThread(nullptr, 0, VrThread, nullptr, 0, nullptr);

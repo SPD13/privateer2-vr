@@ -98,3 +98,17 @@ Target binary: `DARK.EXE` from the Steam 30th Anniversary Edition. It is the Win
 - `SetPaletteEntry(index, rgb6*)` is at 0x46B45C (cdecl). It copies 6-bit RGB into 0x4F095C and fills an 8-bit RGBX table at 0x55CEC0 plus a 16-bit lookup table at 0x4B5C90.
 - p2den diverts this routine, so 0x55CEC0 stays zero. The palette p2den actually displays with is a 256×1 B8G8R8A8 texture on its own device; p2vr reads it back on the GPU.
 - The game sets a 16-bit DirectDraw mode (`SetDisplayMode(640,480,16)`).
+
+## Findings from the VR work (smoothing, HUD markers)
+- **Idle loop:** p2den spin-waits for the next 30 Hz cycle by calling QueryPerformanceCounter about 30 million times a second on the game thread.
+  - p2vr renders its extra (smoothed) VR frames from that import hook. It is the same thread as the game, so no locking is needed.
+- **Game speed:** `CYCLE_HZ_SPACE` in p2den changes the game speed, not just the frame rate. The simulation advances by a fixed step per cycle.
+- **Current target:** `target = *(int*)(game + 0x1216 + player*0x3A0) >> 16`, where `player = *(int*)(game + 0x2785C)`. -1 means no target.
+  - Target actor: `*(game + 0x1210 + target*0x3A0)`.
+  - Target position pointer: `game + target*0x3A0 + 0x127C`.
+- **Target octagon depends on the last render:** it is projected from BRender state left behind by the last render pass.
+  - Any extra BrZbSceneRender (the VR eyes) must be followed by a re-run of the game's own foreground pass (Begin/Add/End with the game camera and buffers) before `FUN_00453B00` runs.
+  - The re-run changes no pixels, because the depth buffer is identical.
+- **Sprite 0x3A** (blitted at 0x45442A inside the marker function) is the **lead indicator**. The octagon, missile lock and arrows are line-drawn.
+- **Marker clipping:** the game clips markers to its own view rectangle and draws edge arrows for off-view targets.
+- **HUD colours:** p2den displays HUD graphics with red and blue swapped relative to the scene palette it uses for the 3D image. This was measured on its output for every HUD colour.

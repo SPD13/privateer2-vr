@@ -19,6 +19,7 @@
 #include "vr.h"
 void Capture_Install(LogFn log);
 void Macro_Start(const char* dir, bool autoplay, LogFn log);
+void Smooth_Install(LogFn log); void Smooth_SetGameThread(); void Smooth_Report(double seconds); void Smooth_SetIdleCallback(void (*cb)());
 
 // ---------------------------------------------------------------- addresses (DARK.EXE 1997-10-15)
 static const uintptr_t ADDR_BEGIN = 0x46d517;   // BrZbSceneRenderBegin
@@ -42,6 +43,7 @@ static const int GAME_DUST = 0x279e0, SHIP_POSPTR = 0x127c;
 static const uintptr_t ADDR_MARKERS_FN   = 0x453b00;
 static const uintptr_t ADDR_MARKERS_CALL = 0x439ac3;   // E8 rel32 call site
 static const uintptr_t ADDR_HUD_FN = 0x454b5c, ADDR_HUD_CALL = 0x439adb;   // static HUD
+static const uintptr_t ADDR_PIP_CALL = 0x45442a;   // inside the marker function: blit of sprite 0x3a = lead indicator
 static const int GAME_STARS = 0x279dc, GAME_SHIPIDX = 0x27858, GAME_SHIPS = 0x1210, SHIP_STRIDE = 0x3a0, NUM_STARS = 0x28a;
 static const uint8_t   BEGIN_PROLOGUE[6] = {0x56, 0x57, 0xC8, 0x34, 0x00, 0x00}; // push esi; push edi; enter 0x34,0
 
@@ -82,10 +84,17 @@ static bool  g_starSprites = true;   // draw star sprites (sun, nebulae) in VR
 static uint8_t* volatile g_game;     // game state pointer captured from the starfield call
 static bool  g_dust = true, g_flare = true;
 static int   g_actorLog = 0;
-static float g_laserWiden = 3.0f, g_laserWidenDist = 60.0f;   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
+static float g_laserWiden = 3.0f, g_laserWidenDist = 60.0f;
+static bool  g_retDynamic = false;
+static bool  g_retInEyes = true;     // crosshair + lead indicator drawn into the 3D image at infinity (ships occlude them)
+static float g_retFracP2 = 0.20f;    // crosshair region (fraction of the HUD width), same as RETICLE_SIZE
+static float g_observerBack = 1.0f;  // metres: eyes sit this far behind the ship centre (HUD plane passes the centre)
+static bool  g_showOwnShip = false;  // draw the player's own ship model in VR (visible once the eyes are behind it)    // crosshair/markers at the depth of what is under the crosshair
+static int   g_smooth = 1;           // 0 = off, 1 = interpolate (1 game frame of delay), 2 = extrapolate (no delay)   // VR-only: shots appear to leave from the wings         // diagnostic: log actors appearing near the ship (lasers etc.)
 static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
 bool Capture_GetPalette(uint8_t out[1024]);
+bool Capture_GetHudRGB(uint8_t* out);
 static char  g_dir[MAX_PATH];
 
 static void Log(const char* fmt, ...) {
@@ -372,9 +381,9 @@ static void DrawDustVr(uint8_t* buf, int W, int H, float tanH, float tanV, const
     const float* parts = *(const float**)(game + GAME_DUST);
     uint8_t* shipEntry = game + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE;
     uint8_t* ship = *(uint8_t**)(shipEntry + GAME_SHIPS);
-    const float* spos = *(const float**)(shipEntry + SHIP_POSPTR);
-    if (!parts || !ship || !spos) return;
+    if (!parts || !ship) return;
     const float* m = (const float*)(ship + ACTOR_T_MAT);
+    const float* spos = m + 9;
     const float* cells = (const float*)ADDR_DUST_CELLS;
     float w[3];
     for (int k = 0; k < 3; k++) { w[k] = spos[k]; while (w[k] > 32.f) w[k] -= 32.f; while (w[k] < -32.f) w[k] += 32.f; }
@@ -524,25 +533,359 @@ static std::vector<uint8_t> g_scene; static int g_sceneW, g_sceneH; static bool 
 // layer for VR (placed on the far boresight plane with the game's exact FOV), add them to the monitor mirror, and
 // clear the buffer again so p2den / the HUD panel only carries the static HUD.
 static bool g_hudDumpNext; static int g_hudDumpIdx;
-extern "C" void __cdecl PostHud() {   // debug: save the 8-bit static HUD (and markers image) on dump requests
+static bool g_frameDone;   // game finished drawing this cycle (static HUD done); smoothing may render until the next one
+static std::vector<uint8_t> g_hudCopy;   // static HUD (crosshair source for the eye images)
+// p2den shows HUD palette indices in other colours than the scene palette says (e.g. the blue crosshair). Learn the
+// displayed colour per index from p2den's frame and map each index to the closest scene-palette colour.
+static uint8_t g_hudRemap[256]; static bool g_hudRemapValid;
+// p2den displays HUD graphics with red and blue swapped compared to the scene palette (measured on its output for
+// every HUD colour). HUD pixels drawn into the eye images are mapped to the scene colour nearest to that swap.
+static uint8_t g_hudSwapLut[256]; static uint32_t g_hudSwapPalHash;
+static void UpdateHudSwapLut() {
+    uint8_t pal[1024]; GetPalRGBX(pal);
+    uint32_t hsh = 2166136261u; for (int i = 0; i < 1024; i++) hsh = (hsh ^ pal[i]) * 16777619u;
+    if (hsh == g_hudSwapPalHash) return;
+    g_hudSwapPalHash = hsh;
+    g_hudSwapLut[0] = 0;
+    for (int c = 1; c < 256; c++) {
+        int r = pal[c*4 + 2], g = pal[c*4 + 1], b = pal[c*4];      // swapped colour
+        int bi = c, bd = 1 << 30;
+        for (int k = 1; k < 256; k++) { int dr = pal[k*4] - r, dg = pal[k*4+1] - g, db = pal[k*4+2] - b, d = dr*dr + dg*dg + db*db; if (d < bd) { bd = d; bi = k; } }
+        g_hudSwapLut[c] = (uint8_t)bi;
+    }
+}
+static void UpdateHudRemap() {
+    static std::vector<uint8_t> rgb(640 * 480 * 3); static DWORD last;
+    if (GetTickCount() - last < 1000 || g_hudCopy.size() != 640 * 480) return;
+    if (!Capture_GetHudRGB(rgb.data())) return;
+    last = GetTickCount();
+    int best[256]; uint8_t col[256][3]; memset(best, -1, sizeof best);
+    for (int i = 0; i < 640 * 480; i++) {                    // brightest displayed colour seen for each index
+        uint8_t c = g_hudCopy[i]; if (!c) continue;
+        const uint8_t* p = &rgb[i * 3]; int s = p[0] + p[1] + p[2];
+        if (s > best[c]) { best[c] = s; col[c][0] = p[0]; col[c][1] = p[1]; col[c][2] = p[2]; }
+    }
+    uint8_t pal[1024]; GetPalRGBX(pal);
+    for (int c = 0; c < 256; c++) {
+        g_hudRemap[c] = (uint8_t)c;
+        if (best[c] < 0) continue;
+        int bi = c, bd = 1 << 30;
+        for (int k = 1; k < 256; k++) {
+            int dr = pal[k*4] - col[c][0], dg = pal[k*4+1] - col[c][1], db = pal[k*4+2] - col[c][2], d = dr*dr + dg*dg + db*db;
+            if (d < bd) { bd = d; bi = k; }
+        }
+        g_hudRemap[c] = (uint8_t)bi;
+    }
+    if (!g_hudRemapValid) {
+        int c0 = g_hudCopy[240 * 640 + 320 + 2];
+        Log("[hudcolor] remap learned (e.g. index %d -> %d)", c0, g_hudRemap[c0]);
+    }
+    g_hudRemapValid = true;
+}
+extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
+    g_frameDone = true;
+    if (g_retInEyes && g_lastCol) {   // crosshair source for the next frames' eye images
+        br_pixelmap* gc = (br_pixelmap*)g_lastCol;
+        if (gc->width == 640 && gc->height == 480) {
+            g_hudCopy.resize(640 * 480);
+            for (int y = 0; y < 480; y++) memcpy(&g_hudCopy[y * 640], gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x, 640);
+            UpdateHudSwapLut();
+        }
+    }
     if (!g_hudDumpNext || !g_lastCol) return;
     g_hudDumpNext = false;
     PALETTEENTRY pal[256]; GetPal(pal); char n[64];
-    sprintf_s(n, "hud_%02d.bmp", g_hudDumpIdx++); WriteBmp(n, (br_pixelmap*)g_lastCol, pal);
+    sprintf_s(n, "hud_%02d.bmp", g_hudDumpIdx); WriteBmp(n, (br_pixelmap*)g_lastCol, pal);
+    {   // raw 8-bit HUD indices + palette + p2den's displayed HUD (RGB) for offline comparison
+        static std::vector<uint8_t> rgb(640 * 480 * 3);
+        char f[MAX_PATH]; sprintf_s(f, "%s\\hudraw_%02d.bin", g_dir, g_hudDumpIdx);
+        FILE* fp; if (!fopen_s(&fp, f, "wb")) {
+            br_pixelmap* gc = (br_pixelmap*)g_lastCol;
+            for (int y = 0; y < 480; y++) fwrite(gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x, 1, 640, fp);
+            uint8_t pr[1024]; GetPalRGBX(pr); fwrite(pr, 1, 1024, fp);
+            bool ok = Capture_GetHudRGB(rgb.data()); if (!ok) memset(rgb.data(), 0, rgb.size()); fwrite(rgb.data(), 1, rgb.size(), fp);
+            fclose(fp); Log("wrote %s (hud rgb %s)", f, ok ? "ok" : "missing");
+        }
+    }
+    g_hudDumpIdx++;
 }
 
+// Target selection marker: the marker function blits sprite 0x3a at the target's projected position (call site 0x45442a). Its rectangle comes
+// from the shape table: entry = shapes + shapes[id*2+2]; bounds at entry+8..0x14 (x0,y0,x1,y1) relative to (x,y).
+struct PipRect { int x0, y0, x1, y1; };
+static PipRect g_pips[8]; static int g_nPips;
+static std::vector<uint8_t> g_pipCopy; static PipRect g_pipCopyRects[8]; static int g_nPipCopy;   // lead indicator source
+extern "C" void __cdecl RecordSprite(int id, int x, int y) {
+    const int32_t* sh = *(const int32_t**)ADDR_SHAPES;
+    if (!sh || g_nPips >= 8) return;
+    const uint8_t* e = (const uint8_t*)sh + sh[id * 2 + 2];
+    g_pips[g_nPips++] = {*(const int32_t*)(e + 8) + x, *(const int32_t*)(e + 12) + y, *(const int32_t*)(e + 16) + x, *(const int32_t*)(e + 20) + y};
+}
+extern "C" void __cdecl PreMarkers() { g_nPips = 0; }
+
+// low-res depth pass through the game camera (see HudFovDepth)
+static std::vector<uint8_t> g_dpC, g_dpD; static float g_dpHither = 1, g_dpYon = 1024; static bool g_dpValid;
+// Split the marker image into separate markers: occupancy on a 4x4-pixel grid, dilated so a bracket's corners
+// join, connected components, then the nearest depth (low-res depth pass = same camera) inside each marker's box.
+static int FindMarkerBlobs(const uint8_t* mk, int w, int h, VrMarkerBlob* out, int maxOut) {
+    const int GW = 160, GH = 120, R = 3;                        // grid cells, merge radius in cells (12 px)
+    if (w != 640 || h != 480) return 0;
+    static uint8_t occ[GW * GH], dil[GW * GH]; static int lab[GW * GH];
+    memset(occ, 0, sizeof occ);
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (mk[y * w + x]) occ[(y >> 2) * GW + (x >> 2)] = 1;
+    memset(dil, 0, sizeof dil);
+    for (int y = 0; y < GH; y++) for (int x = 0; x < GW; x++) if (occ[y * GW + x])
+        for (int dy = -R; dy <= R; dy++) for (int dx = -R; dx <= R; dx++) {
+            int xx = x + dx, yy = y + dy; if (xx >= 0 && xx < GW && yy >= 0 && yy < GH) dil[yy * GW + xx] = 1; }
+    memset(lab, 0, sizeof lab);
+    int n = 0; static int stack[GW * GH];
+    for (int i = 0; i < GW * GH && n < maxOut; i++) {
+        if (!dil[i] || lab[i]) continue;
+        int sp = 0; stack[sp++] = i; lab[i] = n + 1;
+        int x0 = GW, y0 = GH, x1 = -1, y1 = -1;
+        while (sp) {
+            int c = stack[--sp], cx = c % GW, cy = c / GW;
+            if (occ[c]) { if (cx < x0) x0 = cx; if (cx > x1) x1 = cx; if (cy < y0) y0 = cy; if (cy > y1) y1 = cy; }
+            const int nb[4] = {c - 1, c + 1, c - GW, c + GW};
+            for (int k = 0; k < 4; k++) { int q = nb[k];
+                if (q < 0 || q >= GW * GH || (k < 2 && (q / GW) != cy)) continue;
+                if (dil[q] && !lab[q]) { lab[q] = n + 1; stack[sp++] = q; } }
+        }
+        if (x1 < 0) continue;
+        VrMarkerBlob& b = out[n++];
+        int px0 = 640, py0 = 480, px1 = -1, py1 = -1;              // exact pixel bounds inside the component's cells
+        for (int y = y0 * 4; y <= y1 * 4 + 3 && y < h; y++) for (int x = x0 * 4; x <= x1 * 4 + 3 && x < w; x++)
+            if (mk[y * w + x] && lab[(y >> 2) * GW + (x >> 2)] == n) { if (x < px0) px0 = x; if (x > px1) px1 = x; if (y < py0) py0 = y; if (y > py1) py1 = y; }
+        if (px1 < 0) { px0 = x0 * 4; py0 = y0 * 4; px1 = x1 * 4 + 3; py1 = y1 * 4 + 3; }
+        b.x0 = px0; b.y0 = py0; b.x1 = px1; b.y1 = py1; b.depthM = -1; b.layer = 0;
+    }
+    return n;
+}
+
+// Depth of each marker = distance (along the ship axis) of the object whose centre the game projects inside it.
+struct MarkerLink { uint8_t* actor; float offX, offY; float w, h; bool keepOffset; float worldW, worldH; };   // worldW>0: fixed physical size (units)
+static MarkerLink g_mkLink[10]; static int g_nMkLink; static uint32_t g_mkSerial;
+static uint8_t* CameraRef() {   // the actor the game's foreground camera is attached to
+    uint8_t* cam = (uint8_t*)g_cam[1];
+    uint8_t* par = cam ? *(uint8_t**)(cam + 0xC) : nullptr;
+    if (par && par != *(uint8_t**)ADDR_WORLD_FG) return par;
+    return g_game ? *(uint8_t**)(g_game + GAME_SHIPS + *(int*)(g_game + GAME_SHIPIDX) * SHIP_STRIDE) : nullptr;
+}
+static uint8_t* g_targetActor;   // the game's current target object
+static void AssignMarkerDepths(VrMarkerBlob* b, int n, MarkerLink* link) {
+    uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+    if (!game || !wfg || !n) return;
+    uint8_t* ship = CameraRef();
+    if (!ship) return;
+    {   static bool logged; uint8_t* tbl = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+        if (!logged && tbl) { logged = true; const float* a = (const float*)(tbl + ACTOR_T_MAT); const float* c2 = (const float*)(ship + ACTOR_T_MAT);
+            Log("[markers] reference: ship-table actor %p T(%.2f %.2f %.2f) | camera parent %p T(%.2f %.2f %.2f)", tbl, a[9], a[10], a[11], ship, c2[9], c2[10], c2[11]); } }
+    const float* sm = (const float*)(ship + ACTOR_T_MAT); const float K = 461.0357f;
+    struct Cand { float x, y, z; uint8_t* a; }; static Cand cand[256]; int nc = 0;
+    for (int i = 0; i < n; i++) link[i].actor = nullptr;
+    for (uint8_t* a = *(uint8_t**)(wfg + 8); a && nc < 256; a = *(uint8_t**)a) {
+        if (a == ship) continue;
+        bool modelled = a[0x12] == 1 && *(void**)(a + 0x18) && !IsBoltModel(*(void**)(a + 0x18));
+        bool group = !*(void**)(a + 0x18) && *(uint8_t**)(a + 8);           // multi-part object: parts are its children
+        if (!modelled && !group) continue;
+        const float* m = (const float*)(a + ACTOR_T_MAT);
+        float d[3] = {m[9] - sm[9], m[10] - sm[10], m[11] - sm[11]}, v[3];
+        for (int k = 0; k < 3; k++) v[k] = d[0]*sm[k*3] + d[1]*sm[k*3+1] + d[2]*sm[k*3+2];
+        if (v[2] > -1.0f) continue;
+        cand[nc++] = {320.f + v[0] * K / -v[2], 240.f - v[1] * K / -v[2], -v[2], a};
+    }
+    // current target = game entry index at (game + 0x1216 + player*0x3a0) >> 16, player = *(game + 0x2785c); -1 = none
+    g_targetActor = nullptr;
+    {   int player = *(int*)(game + 0x2785c);
+        int tgt = *(int*)(game + 0x1216 + player * SHIP_STRIDE) >> 16;
+        if (tgt >= 0 && tgt < 0x95) g_targetActor = *(uint8_t**)(game + GAME_SHIPS + tgt * SHIP_STRIDE); }
+    bool targetAlive = false;
+    for (int c = 0; c < nc; c++) if (cand[c].a == g_targetActor) targetAlive = true;
+    if (g_targetActor && !targetAlive && nc < 256 && g_targetActor != ship) {   // not in the list: project it directly
+        const float* m = (const float*)(g_targetActor + ACTOR_T_MAT);
+        float d[3] = {m[9] - sm[9], m[10] - sm[10], m[11] - sm[11]}, v[3];
+        for (int k = 0; k < 3; k++) v[k] = d[0]*sm[k*3] + d[1]*sm[k*3+1] + d[2]*sm[k*3+2];
+        if (v[2] < -1.0f) { cand[nc++] = {320.f + v[0] * K / -v[2], 240.f - v[1] * K / -v[2], -v[2], g_targetActor}; targetAlive = true; }
+    }
+    for (int i = 0; i < n; i++) {
+        float cx = (b[i].x0 + b[i].x1) * 0.5f, cy = (b[i].y0 + b[i].y1) * 0.5f, best = 1e30f;
+        for (int c = 0; c < nc; c++) {
+            // the game draws its markers a bit off the object's origin (more so when close): generous tolerance
+            int tol = (b[i].x1 - b[i].x0 + 1) > 24 ? (b[i].x1 - b[i].x0 + 1) : 24;
+            if (b[i].layer == 1) tol = 96;                      // lead indicator sits ahead of the target
+            if (cand[c].x < b[i].x0 - tol || cand[c].x > b[i].x1 + tol || cand[c].y < b[i].y0 - tol || cand[c].y > b[i].y1 + tol) continue;
+            float dd = (cand[c].x - cx) * (cand[c].x - cx) + (cand[c].y - cy) * (cand[c].y - cy);
+            if (dd < best) { best = dd; b[i].depthM = cand[c].z / g_worldScale;
+                link[i] = {cand[c].a, cx - cand[c].x, cy - cand[c].y, (float)(b[i].x1 - b[i].x0 + 1), (float)(b[i].y1 - b[i].y0 + 1), b[i].layer == 1}; }
+        }
+        // Target bracket (octagon) and lead indicator belong to the game's current target (read from game data).
+        bool octagon = b[i].layer == 0 && (b[i].x1 - b[i].x0) >= 30 && (b[i].y1 - b[i].y0) >= 30;
+        bool lead = b[i].layer == 1;
+        if ((octagon || lead) && targetAlive) {
+            for (int c = 0; c < nc; c++) if (cand[c].a == g_targetActor) {
+                b[i].depthM = cand[c].z / g_worldScale;
+                link[i] = {cand[c].a, lead ? cx - cand[c].x : 0.f, lead ? cy - cand[c].y : 0.f,
+                           (float)(b[i].x1 - b[i].x0 + 1), (float)(b[i].y1 - b[i].y0 + 1), lead};
+            }
+        }
+    }
+}
+
+static bool g_posesWithEyes = true;   // marker poses travel with the eye images rendered at the same moment
+static void UpdateMarkerPoses(); static void ApplyBlend(float f); static void RestoreBlend(); static float BlendFactor();
 extern "C" void __cdecl PostMarkers() {
     if (!g_markersPending || !g_lastCol) return;
     g_markersPending = false;
     br_pixelmap* gc = (br_pixelmap*)g_lastCol;
     int w = gc->width, h = gc->height;
-    static std::vector<uint8_t> mk; mk.resize((size_t)w * h);
+    static std::vector<uint8_t> mk, pip, both; mk.resize((size_t)w * h); pip.assign((size_t)w * h, 0);
     for (int y = 0; y < h; y++) {
         uint8_t* row = gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x;
         memcpy(&mk[(size_t)y * w], row, w); memset(row, 0, w);
     }
+    // lead-indicator pixels -> their own image (shown on the crosshair plane)
+    VrMarkerBlob blobs[10]; int nb = 0;
+    for (int i = 0; i < g_nPips && nb < 4; i++) {
+        PipRect r = g_pips[i];
+        if (r.x0 < 0) r.x0 = 0; if (r.y0 < 0) r.y0 = 0; if (r.x1 >= w) r.x1 = w - 1; if (r.y1 >= h) r.y1 = h - 1;
+        if (r.x1 < r.x0 || r.y1 < r.y0) continue;
+        for (int y = r.y0; y <= r.y1; y++) for (int x = r.x0; x <= r.x1; x++) { size_t k = (size_t)y * w + x; if (mk[k]) { pip[k] = mk[k]; mk[k] = 0; } }
+        blobs[nb++] = {r.x0, r.y0, r.x1, r.y1, -1.0f, 1};
+    }
+    int nm = FindMarkerBlobs(mk.data(), w, h, blobs + nb, 10 - nb);
+    nb += nm;
+    MarkerLink links[10] = {};
+    AssignMarkerDepths(blobs, nb, links);   // target sprite + other markers: placed at the object they are drawn on
+    // Target octagon: always shown from a stored copy of the last *complete* octagon the game drew, with a fixed
+    // physical size around the target (measured when complete, smoothed) -> no clipping at the game's view edges,
+    // and smooth growth while closing in (the game only resizes it at 30 Hz).
+    static std::vector<uint8_t> octCache; static int octW, octH; static float octWorldW, octWorldH;   // world units
+    const float K = 461.0357f;
+    static uint8_t* octFor;                                    // target the stored octagon belongs to
+    if (g_targetActor != octFor) { octFor = g_targetActor; octCache.clear(); octWorldW = octWorldH = 0; }
+    // dominant (most frequent) colour index of a marker box: the octagon and e.g. the missile-lock reticle differ
+    auto dominant = [&](const VrMarkerBlob& bl) -> int {
+        int cnt[256] = {};
+        for (int y = bl.y0; y <= bl.y1; y++) for (int x = bl.x0; x <= bl.x1; x++) cnt[mk[(size_t)y * w + x]]++;
+        int best = 0; for (int c = 1; c < 256; c++) if (cnt[c] > cnt[best] || best == 0) best = cnt[c] ? c : best;
+        return best;
+    };
+    static int knownOctColour = -1;                            // learned from the first complete octagon
+    int oct = -1;
+    for (int i = 0; i < nb; i++)
+        if (blobs[i].layer == 0 && links[i].actor && links[i].actor == g_targetActor && blobs[i].x1 - blobs[i].x0 >= 20 && blobs[i].y1 - blobs[i].y0 >= 20) {
+            if (oct < 0) oct = i;
+            else if (knownOctColour >= 0 && dominant(blobs[i]) == knownOctColour && dominant(blobs[oct]) != knownOctColour) oct = i;
+        }
+    int octColour = oct >= 0 ? dominant(blobs[oct]) : -1;
+    if (oct >= 0) {   // a large octagon falls apart into several pieces: merge nearby pieces of the same colour into it
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (int i = 0; i < nb; i++) {
+                if (i == oct || blobs[i].layer != 0) continue;
+                const int m = 20;
+                bool isNear = blobs[i].x1 >= blobs[oct].x0 - m && blobs[i].x0 <= blobs[oct].x1 + m && blobs[i].y1 >= blobs[oct].y0 - m && blobs[i].y0 <= blobs[oct].y1 + m;
+                if (!isNear || dominant(blobs[i]) != octColour) continue;
+                if (blobs[i].x0 < blobs[oct].x0) blobs[oct].x0 = blobs[i].x0; if (blobs[i].y0 < blobs[oct].y0) blobs[oct].y0 = blobs[i].y0;
+                if (blobs[i].x1 > blobs[oct].x1) blobs[oct].x1 = blobs[i].x1; if (blobs[i].y1 > blobs[oct].y1) blobs[oct].y1 = blobs[i].y1;
+                for (int k = i; k < nb - 1; k++) { blobs[k] = blobs[k + 1]; links[k] = links[k + 1]; }
+                nb--; if (oct > i) oct--; grew = true; break;
+            }
+        }
+    }
+    // the game clips markers to its own view rectangle: learn it from all markers seen
+    static int clipX0 = 1 << 20, clipY0 = 1 << 20, clipX1 = -1, clipY1 = -1;
+    for (int i = 0; i < nb; i++) if (blobs[i].layer == 0) {
+        if (blobs[i].x0 < clipX0) clipX0 = blobs[i].x0; if (blobs[i].y0 < clipY0) clipY0 = blobs[i].y0;
+        if (blobs[i].x1 > clipX1) clipX1 = blobs[i].x1; if (blobs[i].y1 > clipY1) clipY1 = blobs[i].y1; }
+    // target position as the game sees it (its projection centre) and distance along the ship axis
+    float tx = 0, ty = 0, tz = -1;
+    if (g_targetActor) { uint8_t* ship = CameraRef();
+        if (ship) { const float* sm = (const float*)(ship + ACTOR_T_MAT); const float* m = (const float*)(g_targetActor + ACTOR_T_MAT);
+            float d[3] = {m[9] - sm[9], m[10] - sm[10], m[11] - sm[11]}, v[3];
+            for (int k = 0; k < 3; k++) v[k] = d[0]*sm[k*3] + d[1]*sm[k*3+1] + d[2]*sm[k*3+2];
+            if (v[2] < -1.0f) { tz = -v[2]; tx = 320.f + v[0] * K / tz; ty = 240.f - v[1] * K / tz; } } }
+    if (oct >= 0 && tz > 0) {
+        int ow = blobs[oct].x1 - blobs[oct].x0 + 1, oh = blobs[oct].y1 - blobs[oct].y0 + 1;
+        float cx = (blobs[oct].x0 + blobs[oct].x1) * 0.5f, cy = (blobs[oct].y0 + blobs[oct].y1) * 0.5f;
+        bool square = ow * 10 >= oh * 7 && oh * 10 >= ow * 7;
+        bool inside = blobs[oct].x0 > clipX0 + 1 && blobs[oct].y0 > clipY0 + 1 && blobs[oct].x1 < clipX1 - 1 && blobs[oct].y1 < clipY1 - 1;
+        bool centred = fabsf(cx - tx) < 0.2f * ow + 3 && fabsf(cy - ty) < 0.2f * oh + 3;
+        if (square && inside && centred && ow <= 640 && oh <= 480) {      // complete: store it and its physical size
+            octW = ow; octH = oh; octCache.assign((size_t)ow * oh, 0);
+            for (int y = 0; y < oh; y++) memcpy(&octCache[(size_t)y * ow], &mk[(size_t)(blobs[oct].y0 + y) * w + blobs[oct].x0], ow);
+            knownOctColour = octColour;
+            float ww = ow / K * tz, wh = oh / K * tz;
+            if (octWorldW <= 0) { octWorldW = ww; octWorldH = wh; } else { octWorldW += (ww - octWorldW) * 0.3f; octWorldH += (wh - octWorldH) * 0.3f; }
+        }
+    }
+    for (int i = 0; i < nb; i++)
+        if (i != oct && blobs[i].layer == 0 && links[i].actor && links[i].actor == g_targetActor && tz > 0) {
+            float cx = (blobs[i].x0 + blobs[i].x1) * 0.5f, cy = (blobs[i].y0 + blobs[i].y1) * 0.5f;
+            links[i].offX = cx - tx; links[i].offY = cy - ty; links[i].keepOffset = true;   // animation around the target kept
+        }
+    bool useCache = g_targetActor && !octCache.empty() && octWorldW > 0;
+    if (useCache) {
+        if (oct >= 0) { for (int i = oct; i < nb - 1; i++) { blobs[i] = blobs[i + 1]; links[i] = links[i + 1]; } nb--; }   // replace the game's
+        if (nb < 10) {
+            VrMarkerBlob bb = {0, 0, octW - 1, octH - 1, -1.0f, 2};
+            MarkerLink l = {}; l.actor = g_targetActor; l.w = (float)octW; l.h = (float)octH; l.worldW = octWorldW; l.worldH = octWorldH;
+            blobs[nb] = bb; links[nb] = l; nb++;
+        }
+    } else if (!g_targetActor) { octCache.clear(); octWorldW = octWorldH = 0; }
+    both.assign((size_t)w * 3 * h, 0);                        // [ markers | lead indicator | cached octagon ]
+    for (int y = 0; y < h; y++) { memcpy(&both[(size_t)y * w * 3], &mk[(size_t)y * w], w); memcpy(&both[(size_t)y * w * 3 + w], &pip[(size_t)y * w], w); }
+    if (useCache) for (int y = 0; y < octH && y < h; y++) memcpy(&both[(size_t)y * w * 3 + 2 * w], &octCache[(size_t)y * octW], octW < w ? octW : w);
     uint8_t pal[1024]; GetPalRGBX(pal);
-    Vr_SubmitMarkers(mk.data(), w, h, pal);
+    memcpy(g_mkLink, links, sizeof links); g_nMkLink = nb;
+    for (int i = 0; i < nb; i++) if (blobs[i].layer == 0 && !links[i].actor) blobs[i].depthM = -2.0f;   // HUD glass
+    g_mkSerial = Vr_SubmitMarkers(both.data(), w * 3, h, pal, blobs, nb);
+    // exact 3D poses for this marker set right away, in the same (smoothed) state as the eye images on screen,
+    // so the headset never shows the game's 30 Hz placement in between (that caused a jumping/double marker)
+    g_posesWithEyes = false; ApplyBlend(BlendFactor()); UpdateMarkerPoses(); RestoreBlend(); g_posesWithEyes = true;
+    if (g_hudDumpNext && g_game) {   // debug: every actor in the foreground world, with screen projection
+        uint8_t* ship = CameraRef(); const float K = 461.0357f;
+        if (ship) {
+            const float* sm = (const float*)(ship + ACTOR_T_MAT);
+            struct It { uint8_t* a; int depth; float M[12]; };
+            std::vector<It> st; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+            float I[12] = {1,0,0, 0,1,0, 0,0,1, 0,0,0};
+            for (uint8_t* a = *(uint8_t**)(wfg + 8); a; a = *(uint8_t**)a) { It it; it.a = a; it.depth = 1; memcpy(it.M, I, 48); st.push_back(it); }
+            int logged = 0;
+            while (!st.empty() && logged < 120) {
+                It it = st.back(); st.pop_back();
+                const float* l = (const float*)(it.a + ACTOR_T_MAT); const float* P = it.M;
+                float W[12];   // world = local * parent (row vectors)
+                for (int r = 0; r < 4; r++) for (int c = 0; c < 3; c++) {
+                    float lr0 = l[r*3], lr1 = l[r*3+1], lr2 = l[r*3+2];
+                    W[r*3+c] = lr0 * P[c] + lr1 * P[3+c] + lr2 * P[6+c] + (r == 3 ? P[9+c] : 0); }
+                float d[3] = {W[9] - sm[9], W[10] - sm[10], W[11] - sm[11]}, v[3];
+                for (int k = 0; k < 3; k++) v[k] = d[0]*sm[k*3] + d[1]*sm[k*3+1] + d[2]*sm[k*3+2];
+                float px = v[2] < -0.1f ? 320.f + v[0] * K / -v[2] : -9999, py = v[2] < -0.1f ? 240.f - v[1] * K / -v[2] : -9999;
+                uint8_t* kids = *(uint8_t**)(it.a + 8);
+                Log("[actors] %*s%p type %u ttype %u model %p kids %s | ship-space (%.1f %.1f %.1f) screen (%.0f,%.0f)%s",
+                    it.depth * 2, "", it.a, it.a[0x12], *(uint16_t*)(it.a + ACTOR_T_TYPE), *(void**)(it.a + 0x18), kids ? "yes" : "no",
+                    v[0], v[1], v[2], px, py, it.a == ship ? " <- own ship" : "");
+                logged++;
+                if (kids && it.depth < 4) for (uint8_t* k = kids; k; k = *(uint8_t**)k) { It c; c.a = k; c.depth = it.depth + 1; memcpy(c.M, W, 48); st.push_back(c); }
+            }
+        }
+    }
+    if (g_hudDumpNext) {   // debug: marker matching details on dump
+        for (int i = 0; i < nb; i++) {
+            float cx = (blobs[i].x0 + blobs[i].x1) * 0.5f, cy = (blobs[i].y0 + blobs[i].y1) * 0.5f;
+            Log("[markers] dump #%d %s box (%d,%d)-(%d,%d) centre %.0f,%.0f depth %.2f m | actor %p offset px (%.1f, %.1f)",
+                i, blobs[i].layer ? "target" : "mark", blobs[i].x0, blobs[i].y0, blobs[i].x1, blobs[i].y1, cx, cy, blobs[i].depthM,
+                links[i].actor, links[i].offX, links[i].offY);
+        }
+    }
+    g_pipCopy = pip; g_nPipCopy = 0;                          // lead indicator source for the eye images
+    for (int i = 0; i < nb; i++) if (blobs[i].layer == 1 && g_nPipCopy < 8) g_pipCopyRects[g_nPipCopy++] = {blobs[i].x0, blobs[i].y0, blobs[i].x1, blobs[i].y1};
+    for (size_t i = 0; i < mk.size(); i++) if (pip[i]) mk[i] = pip[i];      // mirror below gets everything
+    static int lastNb = -1; if (nb != lastNb) { lastNb = nb; char t[256]; int o = sprintf_s(t, "[markers] %d:", nb);
+        for (int i = 0; i < nb && o < 230; i++) o += sprintf_s(t + o, sizeof t - o, " (%s%d,%d %.1fm)", blobs[i].layer ? "target " : "", (blobs[i].x0 + blobs[i].x1) / 2, (blobs[i].y0 + blobs[i].y1) / 2, blobs[i].depthM);
+        Log("%s", t); }
     if (g_hudDumpNext) {
         br_pixelmap pm = *gc; pm.pixels = mk.data(); pm.base_x = pm.base_y = 0; pm.row_bytes = (int16_t)w;
         PALETTEENTRY pe[256]; GetPal(pe); char n[64]; sprintf_s(n, "markers_%02d.bmp", g_hudDumpIdx); WriteBmp(n, &pm, pe);
@@ -553,12 +896,197 @@ extern "C" void __cdecl PostMarkers() {
     }
 }
 
-static void RenderVrEyes() {
+// ---------------------------------------------------------------- 90 Hz smoothing
+// The game updates at 30 Hz. Each update the transforms of all actors (both worlds) are snapshotted. Extra VR frames
+// are rendered while p2den spin-waits for the next cycle (see smooth.cpp); for those, every actor's transform is
+// blended between the last two snapshots (interpolation: one game frame of delay; extrapolation: none), the eyes are
+// rendered with the newest head pose, and the exact pre-blend values are written back before returning to the game.
+struct Snap { uint8_t* a; float m[12]; };
+static std::vector<Snap> g_snapPrev, g_snapCur, g_blendSaved;
+static std::unordered_map<uint8_t*, int> g_prevIdx;
+static LONGLONG g_snapT, g_cycleStart, g_lastSpin;
+static double g_period = 1000.0 / 30.0, g_renderCostMs = 5.0;
+static LONG g_lastVrFrame = -1;
+static int g_idleRenders, g_idleSkips;
+
+static void CollectActors(uint8_t* a, std::vector<Snap>& out, int depth) {
+    for (; a && depth < 8; a = *(uint8_t**)a) {
+        if (*(uint16_t*)(a + ACTOR_T_TYPE) == 0) { Snap s; s.a = a; memcpy(s.m, a + ACTOR_T_MAT, 48); out.push_back(s); }
+        uint8_t* kids = *(uint8_t**)(a + 8);
+        if (kids) CollectActors(kids, out, depth + 1);
+    }
+}
+static void TakeSnapshot() {
+    LONGLONG now = Now();
+    if (g_snapT) { double p = Ms(now - g_snapT); if (p > 10 && p < 100) g_period = g_period * 0.9 + p * 0.1; }
+    g_snapT = now;
+    g_snapPrev.swap(g_snapCur); g_snapCur.clear();
+    uint8_t* wbg = *(uint8_t**)ADDR_WORLD_BG; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+    if (wbg) CollectActors(*(uint8_t**)(wbg + 8), g_snapCur, 1);
+    if (wfg) CollectActors(*(uint8_t**)(wfg + 8), g_snapCur, 1);
+    g_prevIdx.clear();
+    for (int i = 0; i < (int)g_snapPrev.size(); i++) g_prevIdx[g_snapPrev[i].a] = i;
+}
+static void Norm(float* v) { float l = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]); if (l > 1e-12f) { v[0] /= l; v[1] /= l; v[2] /= l; } }
+static float Dot(const float* a, const float* b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+// f: 0 = previous snapshot, 1 = current, >1 = extrapolated
+static void ApplyBlend(float f) {
+    g_blendSaved.clear();
+    if (g_snapPrev.empty() || f == 1.0f) return;
+    for (auto& c : g_snapCur) {
+        auto it = g_prevIdx.find(c.a); if (it == g_prevIdx.end()) continue;
+        const float* p = g_snapPrev[it->second].m;
+        if (!memcmp(p, c.m, 48)) continue;
+        float dx = c.m[9] - p[9], dy = c.m[10] - p[10], dz = c.m[11] - p[11];
+        if (dx*dx + dy*dy + dz*dz > 300.f * 300.f) continue;            // teleport / jump: don't blend
+        Snap sv; sv.a = c.a; memcpy(sv.m, c.a + ACTOR_T_MAT, 48); g_blendSaved.push_back(sv);
+        float m[12];
+        for (int k = 0; k < 12; k++) m[k] = p[k] + (c.m[k] - p[k]) * f;
+        // re-orthonormalise the rotation rows (Gram-Schmidt keeps handedness)
+        float sx = sqrtf(Dot(c.m, c.m)), sy = sqrtf(Dot(c.m + 3, c.m + 3)), sz = sqrtf(Dot(c.m + 6, c.m + 6));
+        float* x = m; float* y = m + 3; float* z = m + 6;
+        Norm(x);
+        float d = Dot(x, y); for (int k = 0; k < 3; k++) y[k] -= x[k] * d; Norm(y);
+        float d1 = Dot(x, z), d2 = Dot(y, z); for (int k = 0; k < 3; k++) z[k] -= x[k] * d1 + y[k] * d2; Norm(z);
+        for (int k = 0; k < 3; k++) { x[k] *= sx; y[k] *= sy; z[k] *= sz; }   // keep any actor scale
+        memcpy(c.a + ACTOR_T_MAT, m, 48);
+    }
+}
+static void RestoreBlend() {
+    for (auto it = g_blendSaved.rbegin(); it != g_blendSaved.rend(); ++it) memcpy(it->a + ACTOR_T_MAT, it->m, 48);
+    g_blendSaved.clear();
+}
+static float BlendFactor() {
+    if (!g_smooth || !g_snapT) return 1.0f;
+    double a = Ms(Now() - g_snapT) / g_period;
+    if (g_smooth == 1) return (float)(a < 0 ? 0 : a > 1 ? 1 : a);
+    return (float)(1.0 + (a < 0 ? 0 : a > 1 ? 1 : a));
+}
+
+// Distance (game units, along the view axis) of the nearest foreground object inside the game's own field of view
+// (70 x 55 degrees around the boresight = where the crosshair and markers can be), from the left eye's depth buffer
+// right after its foreground pass. The crosshair/marker plane is put in front of it, so no ship appears in front of
+// the HUD symbols. Z-buffer: d/65535 = (1/hither - 1/z) / (1/hither - 1/yon).
+static float g_lastBoreZ = -1, g_minSurf = -1, g_minSurf5 = -1, g_minCentre = -1;
+static const float GAME_TAN_H = 320.0f / 461.0357f, GAME_TAN_V = 240.0f / 461.0357f;
+static float HudFovDepth() {
+    void* wfg = *(void**)ADDR_WORLD_FG; uint8_t* cam = g_cam[1] ? *(uint8_t**)((uint8_t*)g_cam[1] + ACTOR_TYPE_DATA) : nullptr;
+    if (!wfg || !cam || !g_lastCol || !g_lastDep || !g_game) return -1;
+    const int W = 160, H = 120;
+    g_dpC.resize(W * H); g_dpD.resize(W * H * 2);
+    br_pixelmap pc = *(br_pixelmap*)g_lastCol, pd = *(br_pixelmap*)g_lastDep;
+    pc.pixels = g_dpC.data(); pd.pixels = g_dpD.data();
+    pc.base_x = pc.base_y = pd.base_x = pd.base_y = 0; pc.width = pd.width = W; pc.height = pd.height = H;
+    pc.row_bytes = W; pd.row_bytes = W * 2;
+    memset(g_dpD.data(), 0xFF, g_dpD.size());
+    // hide the player's own ship and shots for this measurement
+    uint8_t* ship = *(uint8_t**)(g_game + GAME_SHIPS + *(int*)(g_game + GAME_SHIPIDX) * SHIP_STRIDE);
+    std::vector<uint8_t*> hidden;
+    for (uint8_t* a = *(uint8_t**)((uint8_t*)wfg + 8); a; a = *(uint8_t**)a)
+        if (a[0x12] == 1 && (a == ship || IsBoltModel(*(void**)(a + 0x18)))) { a[0x12] = 0; hidden.push_back(a); }
+    g_inEye2 = true;
+    CallBegin(wfg, g_cam[1], &pc, &pd); CallAdd(wfg); CallEnd();   // game camera = exactly the HUD's field of view
+    g_inEye2 = false;
+    for (auto a : hidden) a[0x12] = 1;
+    const uint16_t* d = (const uint16_t*)g_dpD.data(); uint16_t best = 0xFFFF;
+    for (int i = 0; i < W * H; i++) if (d[i] < best) best = d[i];
+    float hither = *(float*)(cam + 8), yon = *(float*)(cam + 12);
+    g_dpHither = hither; g_dpYon = yon; g_dpValid = true;
+    if (best >= 0xFFF0) return -1;
+    float f = best / 65535.0f, inv = 1.0f / hither - f * (1.0f / hither - 1.0f / yon);
+    return inv > 1e-6f ? 1.0f / inv : -1;
+}
+
+// Draw a rectangle of a 640x480 game HUD image into an eye image at infinity: each eye pixel is mapped through its
+// direction (ship space) back to the game's projection (K = 461.0357 around 320,240). Index 0 = transparent.
+static void DrawAtInfinity(uint8_t* buf, int W, int H, float tanH, float tanV, const float h[9],
+                           const uint8_t* src, int rx0, int ry0, int rx1, int ry1) {
+    if (rx0 < 0) rx0 = 0; if (ry0 < 0) ry0 = 0; if (rx1 > 639) rx1 = 639; if (ry1 > 479) ry1 = 479;
+    if (rx1 < rx0 || ry1 < ry0) return;
+    const float K = 461.0357f, sx = (W * 0.5f) / tanH, sy = (H * 0.5f) / tanV;
+    int ex0 = W, ey0 = H, ex1 = -1, ey1 = -1;                     // bounding box of the rectangle in this eye
+    for (int c = 0; c < 4; c++) {
+        float gx = (c & 1) ? rx1 + 1.f : (float)rx0, gy = (c & 2) ? ry1 + 1.f : (float)ry0;
+        float d[3] = {(gx - 320.f) / K, -(gy - 240.f) / K, -1.f};
+        float ex = h[0]*d[0] + h[1]*d[1] + h[2]*d[2], ey = h[3]*d[0] + h[4]*d[1] + h[5]*d[2], ez = h[6]*d[0] + h[7]*d[1] + h[8]*d[2];
+        if (ez >= -1e-3f) return;
+        int px = (int)floorf(W * 0.5f + ex / -ez * sx), py = (int)floorf(H * 0.5f - ey / -ez * sy);
+        if (px < ex0) ex0 = px; if (px > ex1) ex1 = px; if (py < ey0) ey0 = py; if (py > ey1) ey1 = py;
+    }
+    ex0 -= 2; ey0 -= 2; ex1 += 2; ey1 += 2;
+    if (ex0 < 0) ex0 = 0; if (ey0 < 0) ey0 = 0; if (ex1 >= W) ex1 = W - 1; if (ey1 >= H) ey1 = H - 1;
+    for (int v = ey0; v <= ey1; v++) {
+        float ey = -(v + 0.5f - H * 0.5f) / sy;
+        for (int u = ex0; u <= ex1; u++) {
+            float ex = (u + 0.5f - W * 0.5f) / sx;
+            // eye direction (ex, ey, -1) -> ship space (h rows are the eye axes in ship space)
+            float dx = h[0]*ex + h[3]*ey - h[6], dy = h[1]*ex + h[4]*ey - h[7], dz = h[2]*ex + h[5]*ey - h[8];
+            if (dz >= -1e-4f) continue;
+            int gx = (int)floorf(320.f + dx / -dz * K), gy = (int)floorf(240.f - dy / -dz * K);
+            if (gx < rx0 || gx > rx1 || gy < ry0 || gy > ry1) continue;
+            uint8_t c = src[gy * 640 + gx];
+            if (c) buf[v * W + u] = g_hudSwapLut[c];
+        }
+    }
+}
+
+// Crosshair area in this eye + which pixels a ship covers (depth written by the ship pass) -> headset shader.
+static void SubmitCrosshairMask(int e, int W, int H, float tanH, float tanV, const float h[9]) {
+    int r = (int)(g_retFracP2 * 640 * 0.5f + 0.5f);
+    float gx0 = 320.f - r, gy0 = 240.f - r, gx1 = 320.f + r, gy1 = 240.f + r;
+    const float K = 461.0357f, sx = (W * 0.5f) / tanH, sy = (H * 0.5f) / tanV;
+    int bx0 = W, by0 = H, bx1 = -1, by1 = -1;
+    for (int c = 0; c < 4; c++) {
+        float gx = (c & 1) ? gx1 : gx0, gy = (c & 2) ? gy1 : gy0;
+        float d[3] = {(gx - 320.f) / K, -(gy - 240.f) / K, -1.f};
+        float ex = h[0]*d[0] + h[1]*d[1] + h[2]*d[2], ey = h[3]*d[0] + h[4]*d[1] + h[5]*d[2], ez = h[6]*d[0] + h[7]*d[1] + h[8]*d[2];
+        if (ez >= -1e-3f) { Vr_SetEyeCrosshair(e, h, 0, 0, -1, -1, nullptr, 0, 0, 0, 0); return; }
+        int px = (int)floorf(W * 0.5f + ex / -ez * sx), py = (int)floorf(H * 0.5f - ey / -ez * sy);
+        if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py;
+    }
+    bx0 -= 2; by0 -= 2; bx1 += 2; by1 += 2;
+    if (bx0 < 0) bx0 = 0; if (by0 < 0) by0 = 0; if (bx1 >= W) bx1 = W - 1; if (by1 >= H) by1 = H - 1;
+    if (bx1 < bx0 || by1 < by0) { Vr_SetEyeCrosshair(e, h, 0, 0, -1, -1, nullptr, 0, 0, 0, 0); return; }
+    static std::vector<uint8_t> occ; int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1; occ.resize((size_t)bw * bh);
+    const uint16_t* dp = (const uint16_t*)g_vrDepth.data();
+    for (int y = 0; y < bh; y++) { const uint16_t* row = dp + (size_t)(by0 + y) * W + bx0; uint8_t* o = &occ[(size_t)y * bw];
+        for (int x = 0; x < bw; x++) o[x] = row[x] < 0xFFF0 ? 1 : 0; }
+    Vr_SetEyeCrosshair(e, h, bx0, by0, bx1, by1, occ.data(), gx0, gy0, gx1, gy1);
+}
+
+// LOCAL-space poses of object-linked markers in the current (blended) state; called while the blend is applied.
+static void UpdateMarkerPoses() {
+    uint8_t* game = g_game; if (!game || !g_nMkLink) return;
+    uint8_t* ship = CameraRef(); if (!ship) return;
+    const float* sm = (const float*)(ship + ACTOR_T_MAT); const float K = 461.0357f;
+    float pos[10][3] = {}, size[10][2] = {}; uint8_t valid[10] = {};
+    for (int i = 0; i < g_nMkLink; i++) {
+        uint8_t* a = g_mkLink[i].actor; if (!a) continue;
+        const float* m = (const float*)(a + ACTOR_T_MAT);
+        float d[3] = {m[9] - sm[9], m[10] - sm[10], m[11] - sm[11]}, v[3];
+        for (int k = 0; k < 3; k++) v[k] = d[0]*sm[k*3] + d[1]*sm[k*3+1] + d[2]*sm[k*3+2];
+        float dist = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        if (dist < 1.0f) continue;
+        float z = dist;                                           // angular size is kept relative to the distance
+        // object centre + the game's pixel offset of the marker, at the object's depth
+        float x = v[0], y = v[1];                                 // brackets: exactly at the object's centre
+        if (g_mkLink[i].keepOffset && v[2] < -1.0f) { x += g_mkLink[i].offX / K * -v[2]; y -= g_mkLink[i].offY / K * -v[2]; }   // lead indicator: offset kept
+        pos[i][0] = x / g_worldScale; pos[i][1] = y / g_worldScale; pos[i][2] = v[2] / g_worldScale - g_observerBack;
+        size[i][0] = g_mkLink[i].w / K * z / g_worldScale; size[i][1] = g_mkLink[i].h / K * z / g_worldScale;
+        if (g_mkLink[i].worldW > 0) { size[i][0] = g_mkLink[i].worldW / g_worldScale; size[i][1] = g_mkLink[i].worldH / g_worldScale; }
+        valid[i] = 1;
+    }
+    Vr_SetMarkerPoses(g_mkSerial, pos, size, valid, g_nMkLink, g_posesWithEyes);
+}
+
+static void RenderVrCore() {
     VrEyeTarget t; VrView v[2];
     if (!Vr_GetEyeTarget(&t) || !Vr_GetViews(v)) return;
     void* wbg = *(void**)ADDR_WORLD_BG; void* wfg = *(void**)ADDR_WORLD_FG;
     if (!wbg || !wfg || !g_cam[0] || !g_cam[1] || !g_lastCol) return;
     LONGLONG t0 = Now();
+    g_lastVrFrame = Vr_FrameCounter();
+    ApplyBlend(BlendFactor());
     br_pixelmap* gc = (br_pixelmap*)g_lastCol; br_pixelmap* gd = (br_pixelmap*)g_lastDep;
     g_vrPmC = *gc; g_vrPmD = *gd;
     g_vrPmC.base_x = g_vrPmC.base_y = g_vrPmD.base_x = g_vrPmD.base_y = 0;
@@ -578,6 +1106,11 @@ static void RenderVrEyes() {
     ql = sqrtf(ql); for (int k = 0; k < 4; k++) qh[k] /= ql;
     float hh[9]; QuatRows(qh, hh);
     WidenShots();
+    uint8_t* ownShip = nullptr;
+    if (!g_showOwnShip && g_game) {
+        ownShip = *(uint8_t**)(g_game + GAME_SHIPS + *(int*)(g_game + GAME_SHIPIDX) * SHIP_STRIDE);
+        if (ownShip && ownShip[0x12] == 1) ownShip[0x12] = 0; else ownShip = nullptr;   // type 0 = not drawn
+    }
     for (int e = 0; e < 2; e++) {
         float h[9]; QuatRows(v[e].quat, h);
         // background camera: head rotation on top of the game's own orientation, no translation
@@ -589,6 +1122,7 @@ static void RenderVrEyes() {
         float* mf = (float*)((uint8_t*)g_cam[1] + ACTOR_T_MAT);
         for (int i = 0; i < 9; i++) mf[i] = h[i];
         for (int i = 0; i < 3; i++) mf[9 + i] = s1.mat[9 + i] + v[e].pos[i] * g_worldScale;
+        mf[11] += g_observerBack * g_worldScale;                  // ship +Z = backwards
         SetCamProjection((uint8_t*)g_cam[0], fov, aspect); SetCamProjection((uint8_t*)g_cam[1], fov, aspect);
 
         g_vrPmC.pixels = Vr_EyeBuffer(e);
@@ -596,7 +1130,11 @@ static void RenderVrEyes() {
         DrawStarsVr(g_vrPmC.pixels, t.width, t.height, t.tanHalfH, t.tanHalfV, h);
         memset(g_vrDepth.data(), 0xFF, dsz);
         CallBegin(wbg, g_cam[0], &g_vrPmC, &g_vrPmD); CallAdd(wbg); CallEnd();
-        float eyePos[3] = {v[e].pos[0] * g_worldScale, v[e].pos[1] * g_worldScale, v[e].pos[2] * g_worldScale};
+        if (g_retInEyes) {   // crosshair and lead indicator at infinity: behind ships and dust, in front of planets
+            int r = (int)(g_retFracP2 * 640 * 0.5f + 0.5f);
+            if (g_hudCopy.size() == 640 * 480) DrawAtInfinity(g_vrPmC.pixels, t.width, t.height, t.tanHalfH, t.tanHalfV, h, g_hudCopy.data(), 320 - r, 240 - r, 319 + r, 239 + r);
+        }
+        float eyePos[3] = {v[e].pos[0] * g_worldScale, v[e].pos[1] * g_worldScale, (v[e].pos[2] + g_observerBack) * g_worldScale};
         DrawDustVr(g_vrPmC.pixels, t.width, t.height, t.tanHalfH, t.tanHalfV, h, eyePos);
         memset(g_vrDepth.data(), 0xFF, dsz);
         CallBegin(wfg, g_cam[1], &g_vrPmC, &g_vrPmD); CallAdd(wfg); CallEnd();
@@ -607,11 +1145,15 @@ static void RenderVrEyes() {
         }
     }
     g_inEye2 = false;
+    UpdateMarkerPoses();
+    if (ownShip) ownShip[0x12] = 1;
     RestoreShots();
     RestoreCam(s0); RestoreCam(s1);
+    RestoreBlend();
     uint8_t pal[1024]; GetPalRGBX(pal);
     Vr_SubmitEyes(v, pal);
     double ms = Ms(Now() - t0); g_vrAccMs += ms; g_vrN++; if (ms > g_vrMaxMs) g_vrMaxMs = ms;
+    g_renderCostMs = g_renderCostMs * 0.8 + ms * 0.2;
     if (g_vrDumpNext) {
         { uint8_t pp[1024]; bool cap = Capture_GetPalette(pp); if (!cap) GetPalRGBX(pp);
           Log("vr dump palette (%s): c0=%d,%d,%d c8=%d,%d,%d cf=%d,%d,%d fe=%d,%d,%d", cap ? "p2den" : "game6",
@@ -621,6 +1163,46 @@ static void RenderVrEyes() {
             v[0].pos[0], v[0].pos[1], v[0].pos[2], v[0].quat[0], v[0].quat[1], v[0].quat[2], v[0].quat[3]);
         g_dumpCount++; g_vrDumpNext = false;
     }
+}
+
+// Extra frame while the game waits for its next cycle (called from p2den's spin-wait on the game thread).
+static void IdleTick() {
+    if (!g_frameDone || !g_smooth) return;
+    LONGLONG now = Now(); g_lastSpin = now;
+    if (Vr_FrameCounter() == g_lastVrFrame || !Vr_Active()) return;
+    // only if it finishes before the next cycle is due
+    if (Ms(now - g_cycleStart) + g_renderCostMs * 1.25 + 1.5 > g_period) { g_idleSkips++; g_lastVrFrame = Vr_FrameCounter(); return; }
+    RenderVrCore();
+    g_idleRenders++;
+}
+
+// BRender keeps the camera/viewport set up by the last BrZbSceneRenderBegin. The game projects its HUD markers
+// (target brackets) with that cached state after the 3D passes, so our VR eye renders must not leave theirs behind:
+// re-run Begin (no Add) for the game's own foreground camera and buffers.
+// The render pass also records each object's on-screen box (used for the target octagon), so the game's own
+// foreground pass is re-run (Add) with its camera and buffers: identical depth -> no pixel changes, boxes restored.
+static void RestoreGameCamera(bool reRender) {
+    void* wfg = *(void**)ADDR_WORLD_FG;
+    if (!wfg || !g_cam[1] || !g_lastCol || !g_lastDep) return;
+    bool was = g_inEye2; g_inEye2 = true;
+    CallBegin(wfg, g_cam[1], g_lastCol, g_lastDep); if (reRender) CallAdd(wfg); CallEnd();
+    g_inEye2 = was;
+}
+
+// Once per game cycle, after the game's own foreground pass.
+static void RenderVrEyes() {
+    if (!g_lastCol) return;
+    br_pixelmap* gc = (br_pixelmap*)g_lastCol;
+    TakeSnapshot();
+    RenderVrCore();
+    {   // closest surface in the HUD's view (also used for the optional dynamic crosshair depth)
+        float z = HudFovDepth();
+        if (g_retDynamic) Vr_SetReticleDistance(z > 0 ? z / g_worldScale * 0.95f : -1.0f);
+        g_lastBoreZ = z;
+        if (z > 0 && (g_minSurf < 0 || z < g_minSurf)) g_minSurf = z;
+        if (z > 0 && (g_minSurf5 < 0 || z < g_minSurf5)) g_minSurf5 = z;
+    }
+    RestoreGameCamera(true);   // after our extra renders: the game's own camera state and object screen boxes
     if (g_hudClear) {
         // hand the game's own mono scene (stars, dust, 3D) to the monitor compositor before clearing it
         g_scene.resize((size_t)gc->width * gc->height); g_sceneW = gc->width; g_sceneH = gc->height;
@@ -641,6 +1223,10 @@ extern "C" void __cdecl PreBegin(void* world, uint8_t* cam, br_pixelmap* col, br
     if (g_inEye2) return;
     int idx = (world == *(void**)ADDR_WORLD_BG) ? 0 : (world == *(void**)ADDR_WORLD_FG) ? 1 : -1;
     g_passIdx = idx; g_passStart = Now();
+    if (idx == 0) {   // new game cycle: it started when p2den's spin-wait ended
+        g_frameDone = false;
+        g_cycleStart = (g_lastSpin && Ms(g_passStart - g_lastSpin) < 20.0) ? g_lastSpin : g_passStart;
+    }
     if (idx >= 0) g_cam[idx] = cam;
     g_lastCol = col; g_lastDep = dep;
     if (g_loggedDetail < 6) {
@@ -675,6 +1261,7 @@ extern "C" void __cdecl PostEnd() {
     if (idx >= 0) { g_accMs[idx] += Ms(Now() - g_passStart); g_accN[idx]++; }
     if (idx == 1) {
         g_frames++;
+        Smooth_SetGameThread();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
         static bool prev[9];
@@ -727,9 +1314,44 @@ extern "C" void __cdecl PostEnd() {
             g_frames, g_accN[0] ? g_accMs[0] / g_accN[0] : 0, g_accN[1] ? g_accMs[1] / g_accN[1] : 0,
             g_accEyeN ? g_accEyeMs / g_accEyeN : 0, g_maxEyeMs, g_pmC.width, g_pmC.height, c ? c->width : 0, c ? c->height : 0);
         g_maxEyeMs = 0;
+        {   // game clock and player-ship position: shows whether game speed depends on the cycle rate
+            uint8_t* game = g_game; float pos[3] = {0, 0, 0};
+            if (game) { uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+                        if (ship) memcpy(pos, ship + ACTOR_T_MAT + 36, 12); }
+            Log("[clock] tick %u game_timer %d ship %.2f %.2f %.2f", GetTickCount(), *(volatile int*)0x4f0248, pos[0], pos[1], pos[2]);
+            Smooth_Report((now - g_lastReport) / 1000.0);
+        }
         if (g_vrN) { VrEyeTarget t = {}; Vr_GetEyeTarget(&t);
             Log("[perf] VR both eyes %.2f ms avg (max %.2f) @ %dx%d per eye", g_vrAccMs / g_vrN, g_vrMaxMs, t.width, t.height);
             g_vrAccMs = 0; g_vrN = 0; g_vrMaxMs = 0; }
+        {   // proximity diagnostics: how close do objects get to the player's ship?
+            uint8_t* game = g_game; float nearest = -1; uint8_t* nearA = nullptr;
+            if (game) { uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+                if (ship) { const float* sm = (const float*)(ship + ACTOR_T_MAT);
+                    for (auto& c : g_snapCur) {
+                        if (c.a == ship || c.a[0x12] != 1 || IsBoltModel(*(void**)(c.a + 0x18))) continue;
+                        if (*(uint8_t**)(c.a + 0xC) != *(uint8_t**)ADDR_WORLD_FG) continue;    // direct children of the fg world
+                        float d[3] = {c.m[9] - sm[9], c.m[10] - sm[10], c.m[11] - sm[11]};
+                        float dist = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                        if (nearest < 0 || dist < nearest) { nearest = dist; nearA = c.a; } }
+                    static bool dumpedShip; if (!dumpedShip && *(void**)(ship + 0x18)) { dumpedShip = true;
+                        const float* f = (const float*)*(uint8_t**)(ship + 0x18);
+                        Log("[proximity] player ship model %p floats[8..23]: %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g", (void*)f,
+                            f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19], f[20], f[21], f[22], f[23]); } } }
+            if (nearest > 0 && (g_minCentre < 0 || nearest < g_minCentre)) g_minCentre = nearest;
+            if (nearA && *(void**)(nearA + 0x18)) {
+                static void* lastModel; void* mdl = *(void**)(nearA + 0x18);
+                if (mdl != lastModel) { lastModel = mdl; const float* f = (const float*)mdl;
+                    Log("[proximity] nearest object model %p floats[8..23]: %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g", mdl,
+                        f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19], f[20], f[21], f[22], f[23]); } }
+            Log("[proximity] closest surface in HUD view %.1f units (5s min %.1f, session min %.1f) | nearest object centre %.1f (session min %.1f) | units/m %.0f",
+                g_lastBoreZ, g_minSurf5, g_minSurf, nearest, g_minCentre, g_worldScale);
+            g_minSurf5 = -1;
+        }
+        if (g_smooth) { double sec = (now - g_lastReport) / 1000.0;
+            Log("[smooth] mode %d: %.1f extra frames/s, %.1f skipped/s (deadline), game period %.2f ms, render %.2f ms",
+                g_smooth, g_idleRenders / sec, g_idleSkips / sec, g_period, g_renderCostMs);
+            g_idleRenders = g_idleSkips = 0; }
         g_frames = 0; g_accMs[0] = g_accMs[1] = g_accEyeMs = 0; g_accN[0] = g_accN[1] = g_accEyeN = 0;
         g_lastReport = now;
     }
@@ -780,8 +1402,25 @@ __declspec(naked) static void HookStars() {
     }
 }
 
+static uintptr_t g_spriteFn = ADDR_SPRITE_FN;
+__declspec(naked) static void HookPipCall() {    // cdecl (view, shapes, id, x, y): record, then tail-jump to the blit
+    __asm {
+        pushad
+        push dword ptr [esp + 52]   // y
+        push dword ptr [esp + 52]   // x
+        push dword ptr [esp + 52]   // id
+        call RecordSprite
+        add esp, 12
+        popad
+        jmp dword ptr [g_spriteFn]
+    }
+}
+
 __declspec(naked) static void HookMarkersCall() {
     __asm {
+        pushad
+        call PreMarkers
+        popad
         call dword ptr [g_markersFn]
         pushad
         call PostMarkers
@@ -853,7 +1492,13 @@ static void InstallHooks() {
         *(int32_t*)(ADDR_HUD_CALL + 1) = (int32_t)((uintptr_t)HookHudCall - (ADDR_HUD_CALL + 5));
         VirtualProtect((void*)ADDR_HUD_CALL, 5, old, &old); e = true;
     }
-    Log("hooks: begin=%d end=%d stars=%d markers=%d hud=%d", a, b, c, d, e);
+    bool f = false;
+    if (*(uint8_t*)ADDR_PIP_CALL == 0xE8 && ADDR_PIP_CALL + 5 + *(int32_t*)(ADDR_PIP_CALL + 1) == ADDR_SPRITE_FN) {
+        DWORD old; VirtualProtect((void*)ADDR_PIP_CALL, 5, PAGE_EXECUTE_READWRITE, &old);
+        *(int32_t*)(ADDR_PIP_CALL + 1) = (int32_t)((uintptr_t)HookPipCall - (ADDR_PIP_CALL + 5));
+        VirtualProtect((void*)ADDR_PIP_CALL, 5, old, &old); f = true;
+    }
+    Log("hooks: begin=%d end=%d stars=%d markers=%d hud=%d pip=%d", a, b, c, d, e, f);
 }
 
 // ---------------------------------------------------------------- DirectDrawCreate wrapper (forwarded to p2den)
@@ -890,6 +1535,13 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_dust = GetPrivateProfileIntA("VR", "DUST", 1, p) != 0;
         g_actorLog = GetPrivateProfileIntA("VR", "ACTOR_LOG", 0, p);
         GetPrivateProfileStringA("VR", "LASER_WIDEN", "3.0", b, 32, p); g_laserWiden = (float)atof(b);
+        g_smooth = GetPrivateProfileIntA("VR", "SMOOTH", 1, p);
+        g_retDynamic = GetPrivateProfileIntA("VR", "RETICLE_DYNAMIC", 0, p) != 0;
+        GetPrivateProfileStringA("VR", "OBSERVER_BACK", "1.0", b, 32, p); g_observerBack = (float)atof(b);
+        g_showOwnShip = GetPrivateProfileIntA("VR", "SHOW_OWN_SHIP", 0, p) != 0;
+        g_retInEyes = GetPrivateProfileIntA("VR", "RETICLE_IN_EYES", 1, p) != 0;
+        if (GetPrivateProfileIntA("VR", "RETICLE_GLASS", 1, p)) g_retInEyes = false;   // crosshair is on the HUD glass instead
+        GetPrivateProfileStringA("VR", "RETICLE_SIZE", "0.20", b, 32, p); g_retFracP2 = (float)atof(b);
         GetPrivateProfileStringA("VR", "LASER_WIDEN_DIST", "60", b, 32, p); g_laserWidenDist = (float)atof(b);
         g_flare = GetPrivateProfileIntA("VR", "LENS_FLARE", 1, p) != 0;
         GetPrivateProfileStringA("VR", "DUST_SCALE", "1.0", b, 32, p); g_dustScale = (float)atof(b);
@@ -898,7 +1550,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         Log("p2vr loaded: mode=%d ipd=%.3f sweep=%.1f fovscale=%.2f eye=%dx%d", g_mode, g_ipd, g_sweepDeg, g_fovScale, g_eyeW, g_eyeH);
         InstallHooks();
         if (GetPrivateProfileIntA("VR", "EYE_MAX", 2048, p) > 2048) Log("BRender 2048 size check lifted: %d", LiftSizeLimit());
-        if (g_vrEnable) { Capture_Install(Log); Vr_Start(p, Log); }
+        if (g_vrEnable) { Capture_Install(Log); Vr_Start(p, Log); Vr_SetObserverBack(g_observerBack); }
+        Smooth_Install(Log);
+        Smooth_SetIdleCallback(IdleTick);
         Macro_Start(g_dir, GetPrivateProfileIntA("VR", "AUTOPLAY", 0, p) != 0, Log);
     }
     return TRUE;

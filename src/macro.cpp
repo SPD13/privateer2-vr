@@ -40,6 +40,15 @@ static bool GameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
+// Windows blocks focus changes from background processes; a synthetic Alt press makes SetForegroundWindow allowed.
+static void BringGameToFront() {
+    HWND w = GameWindow(); if (!w) return;
+    INPUT in[2] = {}; in[0].type = in[1].type = INPUT_KEYBOARD; in[0].ki.wVk = in[1].ki.wVk = VK_MENU; in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+    ShowWindow(w, SW_RESTORE); SetForegroundWindow(w); BringWindowToTop(w);
+    Log("[macro] brought game window to the front: %s", GameHasFocus() ? "ok" : "not yet");
+}
+
 static void Save() {
     FILE* f; if (fopen_s(&f, s_path, "w")) return;
     fprintf(f, "# p2vr input macro: time_s type a b c\n");
@@ -66,6 +75,7 @@ static DWORD WINAPI ReplayThread(LPVOID) {
     std::vector<Ev> ev;
     if (!Load(ev)) { Log("[macro] nothing to replay (%s)", s_path); s_replaying = false; return 0; }
     Log("[macro] replay started: %zu events, %.1f s", ev.size(), ev.back().t);
+    if (!GameHasFocus()) BringGameToFront();
     bool down[256] = {};
     double shift = 0; int clicks = 0;
     for (auto& e : ev) {
@@ -73,7 +83,11 @@ static DWORD WINAPI ReplayThread(LPVOID) {
         if (s_abort) break;
         if (!GameHasFocus()) {   // never inject into another window: pause and shift the remaining timeline
             double p0 = NowS(); Log("[macro] paused at %.1f s: game window not in front", e.t);
-            while (!GameHasFocus() && !s_abort) Sleep(20);
+            DWORD lastTry = 0;
+            while (!GameHasFocus() && !s_abort) {
+                if (GetTickCount() - lastTry > 2000) { lastTry = GetTickCount(); BringGameToFront(); }
+                Sleep(20);
+            }
             if (s_abort) break;
             Sleep(300); shift += NowS() - p0; Log("[macro] resumed after %.1f s", NowS() - p0);
         }
@@ -183,17 +197,22 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
+static bool s_autoRecord;
 static DWORD WINAPI HookThread(LPVOID autoplay) {
     HHOOK kb = SetWindowsHookExA(WH_KEYBOARD_LL, KbHook, GetModuleHandleA(nullptr), 0);
     HHOOK ms = SetWindowsHookExA(WH_MOUSE_LL, MouseHook, GetModuleHandleA(nullptr), 0);
     Log("[macro] input hooks %s (Ctrl+F2 record, Ctrl+F3 replay)%s", kb && ms ? "ok" : "FAILED", autoplay ? ", autoplay on" : "");
-    if (autoplay && GetFileAttributesA(s_path) != INVALID_FILE_ATTRIBUTES) StartReplay();
+    if (s_autoRecord) {
+        EnterCriticalSection(&s_cs); s_rec.clear(); LeaveCriticalSection(&s_cs);
+        s_recording = true; Log("[macro] recording from game start (Ctrl+F2 stops and saves)");
+    } else if (autoplay && GetFileAttributesA(s_path) != INVALID_FILE_ATTRIBUTES) StartReplay();
     MSG msg; while (GetMessageA(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
     return 0;
 }
 
 void Macro_Start(const char* dir, bool autoplay, LogFn log) {
     Log = log;
+    char ini[MAX_PATH]; sprintf_s(ini, "%s\\p2vr.ini", dir); s_autoRecord = GetPrivateProfileIntA("VR", "AUTORECORD", 0, ini) != 0;
     InitializeCriticalSection(&s_cs);
     QueryPerformanceFrequency(&s_qpf); QueryPerformanceCounter(&s_t0);
     sprintf_s(s_path, "%s\\macro.txt", dir);

@@ -19,7 +19,23 @@ bool Vr_GetViews(VrView v[2]);              // latest predicted eye poses
 bool Vr_GetEyeTarget(VrEyeTarget* t);
 uint8_t* Vr_EyeBuffer(int eye);             // 8-bit back buffer (width*height), write then submit
 void Vr_SubmitEyes(const VrView used[2], const uint8_t paletteRGBX[1024]);
+// Crosshair drawn by the headset shader from p2den's displayed HUD, at infinity, behind ships. Per eye, before
+// Vr_SubmitEyes: eye rows (eye axes in ship space), eye-pixel box of the crosshair area, occlusion mask for that box
+// (1 = covered by a ship), and the crosshair rectangle in game pixels (640x480).
+void Vr_SetEyeCrosshair(int eye, const float rows[9], int bx0, int by0, int bx1, int by1, const uint8_t* occ,
+                        float gx0, float gy0, float gx1, float gy1);
 void Vr_SetScreenSource(HANDLE sharedTex, int w, int h, uint32_t frameNo);  // from the p2den Present hook
 void Vr_RequestRecenter();
-void Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t paletteRGBX[1024]);  // 8-bit, 0 = transparent
+void Vr_SetReticleDistance(float metres);   // depth of what is under the crosshair (<= 0: use RETICLE_DIST)
+LONG Vr_FrameCounter();                    // increments whenever new predicted eye poses are available
+// One HUD marker (bracket, lead indicator, nav marker) found in the 640x480 marker image, with the distance of
+// the object it marks (metres along the ship axis from the ship centre; <= 0 = at infinity).
+struct VrMarkerBlob { int x0, y0, x1, y1; float depthM; int layer; };   // depthM: >0 metres, -1 infinity, -2 HUD glass   // layer = texture third: 0 markers, 1 lead sprite, 2 cached octagon
+uint32_t Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t paletteRGBX[1024],
+                          const VrMarkerBlob* blobs, int nBlobs);  // 8-bit image, 0 = transparent; returns serial
+void Vr_SetObserverBack(float metres);   // eyes sit this far behind the ship centre
+// Per rendered frame: LOCAL-space centre/size of markers that follow an object (same blended state as the eyes).
+// valid[i] = 0 keeps the game's 30 Hz placement for that marker. serial = value returned by Vr_SubmitMarkers.
+void Vr_SetMarkerPoses(uint32_t serial, const float (*pos)[3], const float (*size)[2], const uint8_t* valid, int n,
+                       bool withEyes);   // withEyes: rendered together with the eye images about to be submitted
 LUID Vr_AdapterLuid();                      // adapter the HMD runtime wants (valid when Active)
