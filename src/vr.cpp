@@ -38,7 +38,17 @@ static int s_maxLayers = 16;
 static bool s_maximize = true;   // WINDOW_MAXIMIZE: p2den renders at the window size, so a bigger window = sharper films/menus/HUD                                        // runtime's composition layer limit
 // HUD panels: rectangles of the 640x480 HUD shown as separate quads placed around the player (HUD_PANELS=1)
 struct HudPanel { char name[16]; float r[4]; float pos[3]; float yaw, pitch, width; };
-static HudPanel s_panels[8]; static int s_nPanels; static bool s_panelsOn;
+static const int MAX_PANELS = 12;
+static HudPanel s_panels[MAX_PANELS]; static int s_nPanels; static bool s_panelsOn;
+// panels with something drawn in them this game frame (bit per panel, from the game's HUD image, Vr_SetPanelMask): only
+// those get a compositor layer, so closed windows (e.g. the guns VDW) leave the layers to the 3D markers
+static volatile LONG s_panelMask = -1;
+void Vr_SetPanelMask(uint32_t mask) { InterlockedExchange(&s_panelMask, (LONG)mask); }
+int Vr_GetPanelRects(int (*r)[4], int max) {
+    int n = 0;
+    for (int k = 0; k < s_nPanels && n < max; k++, n++) for (int i = 0; i < 4; i++) r[n][i] = (int)s_panels[k].r[i];
+    return s_panelsOn ? n : 0;
+}
 static bool s_actionsReady; static CRITICAL_SECTION s_ctlCs; static VrControls s_ctl;
 static float s_deadzone = 0.15f;
 static float s_eyeScale = 1.0f;      // multiplier on the runtime's recommended size
@@ -200,7 +210,7 @@ V vs(uint id : SV_VertexID) {
     V o; o.uv = float2((id << 1) & 2, id & 2); o.p = float4(o.uv * float2(2, -2) + float2(-1, 1), 0, 1); return o;
 }
 Texture2D<uint>   occ : register(t3);
-cbuffer P : register(b2) { float4 prect[8]; float4 pinfo; };   // HUD panels cut out of the main HUD (uv rects), pinfo.x = count
+cbuffer P : register(b2) { float4 prect[12]; float4 pinfo; };   // HUD panels cut out of the main HUD (uv rects), pinfo.x = count
 cbuffer E : register(b1) { float4 r0; float4 r1; float4 r2; float4 eye; float4 box; float4 grect; float4 crop; float4 flags; };
 float4 psIndex(V i) : SV_Target {
     uint c = idx.Load(int3(i.p.xy, 0));
@@ -267,7 +277,7 @@ static bool CompileShaders() {
     d3d->CreateBuffer(&bd, nullptr, &cbuf);
     D3D11_BUFFER_DESC be = {128, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
     d3d->CreateBuffer(&be, nullptr, &cbufEye[0]); d3d->CreateBuffer(&be, nullptr, &cbufEye[1]);
-    D3D11_BUFFER_DESC bp = {144, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};
+    D3D11_BUFFER_DESC bp = {208, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER};   // 12 rects + info
     d3d->CreateBuffer(&bp, nullptr, &cbufPanels);
     D3D11_TEXTURE2D_DESC td = {256, 1, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
     d3d->CreateTexture2D(&td, nullptr, &palTex); d3d->CreateShaderResourceView(palTex, nullptr, &palSrv);
@@ -748,11 +758,11 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
     ctx->VSSetShader(vsFull, nullptr, 0); ctx->PSSetShader(psScreen, nullptr, 0);
     ID3D11ShaderResourceView* srvs[3] = {nullptr, nullptr, src};
     ctx->PSSetShaderResources(0, 3, srvs); ctx->PSSetSamplers(0, 1, &linSamp); ctx->PSSetConstantBuffers(0, 1, &cbuf);
-    float pcb[36] = {};   // panel rectangles (uv) cut out of the main HUD in flight
+    float pcb[52] = {};   // panel rectangles (uv) cut out of the main HUD in flight
     bool panels = flight && s_panelsOn;
     if (panels) { for (int k = 0; k < s_nPanels; k++) { pcb[k*4] = s_panels[k].r[0] / 640.f; pcb[k*4+1] = s_panels[k].r[1] / 480.f;
                                                           pcb[k*4+2] = s_panels[k].r[2] / 640.f; pcb[k*4+3] = s_panels[k].r[3] / 480.f; }
-                  pcb[32] = (float)s_nPanels; }
+                  pcb[48] = (float)s_nPanels; }
     ctx->UpdateSubresource(cbufPanels, 0, nullptr, pcb, 0, 0); ctx->PSSetConstantBuffers(2, 1, &cbufPanels);
     float hw = s_retPx / (2.0f * HUD_PX_W), hh = s_retPx / (2.0f * HUD_PX_H);   // crosshair region half-size in HUD uv
     // pass 1: whole HUD (hole over the crosshair region in flight)
@@ -775,7 +785,7 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
             xrWaitSwapchainImage(panelSc.sc, &wi);
             ctx->ClearRenderTargetView(panelSc.rtv[j], clear);
             ctx->OMSetRenderTargets(1, &panelSc.rtv[j], nullptr);
-            float zero[36] = {}; ctx->UpdateSubresource(cbufPanels, 0, nullptr, zero, 0, 0);
+            float zero[52] = {}; ctx->UpdateSubresource(cbufPanels, 0, nullptr, zero, 0, 0);
             float cbp[16] = {s_keyGain, 1.f, s_uScale, s_uOff, s_keyThresh, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0};
             ctx->UpdateSubresource(cbuf, 0, nullptr, cbp, 0, 0);
             D3D11_VIEWPORT vp3 = {0, 0, (float)HUD_PX_W, (float)HUD_PX_H, 0, 1}; ctx->RSSetViewports(1, &vp3); ctx->Draw(3, 0);
@@ -1012,7 +1022,7 @@ static void FrameLoop() {
         int msgSlot = toolOpen ? 0 : (targetDone && s_msgShow == 1) ? 1 : -1;
         if (targetDone && sessState == XR_SESSION_STATE_FOCUSED && msgSlot < 0) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
         else s_ptrHit = false;
-        XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[8];
+        XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[MAX_PANELS];
         if (fs.shouldRender && targetDone) {
             if (flight) { UploadEyes(); UpdateMarkers(); }
             UpdateScreen(flight);
@@ -1035,7 +1045,9 @@ static void FrameLoop() {
                     LeaveCriticalSection(&s_cs);
                     const float K = 461.0357f, sc = (float)markSc.w / (s_mkW ? s_mkW : 640);
                     float inf = s_retDist > 0 ? s_retDist : 500.0f;
-                    int budget = s_maxLayers - 3 - (s_panelsOn ? s_nPanels : 0);   // projection, HUD, crosshair, panels
+                    int shownPanels = 0; uint32_t pmask = (uint32_t)s_panelMask;
+                    if (s_panelsOn) for (int k = 0; k < s_nPanels; k++) shownPanels += (pmask >> k) & 1;
+                    int budget = s_maxLayers - 3 - shownPanels;   // projection, HUD, crosshair, panels in use
                     for (int b = 0; b < s_nShownBlobs; b++) {
                         if ((int)layers.size() - 1 >= budget) break;
                         const VrMarkerBlob& bl = s_shownBlobs[b];
@@ -1082,7 +1094,9 @@ static void FrameLoop() {
                 layers.push_back((XrCompositionLayerBaseHeader*)&quad);
                 if (flight && s_panelsOn && havePanels) {
                     const float px = (float)HUD_PX_W / 640.f;
+                    uint32_t pmask = (uint32_t)s_panelMask;
                     for (int k = 0; k < s_nPanels; k++) {
+                        if (!((pmask >> k) & 1)) continue;                     // nothing drawn there: no layer
                         const HudPanel& hp = s_panels[k]; XrCompositionLayerQuad& q = pq[k]; q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
                         int x0 = (int)(hp.r[0] * px), y0 = (int)(hp.r[1] * px), x1 = (int)(hp.r[2] * px), y1 = (int)(hp.r[3] * px);
                         q.space = localSpace; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -1177,7 +1191,8 @@ void Vr_Start(const char* ini, LogFn log) {
         {"RADAR",          "254,346,388,478,  0,-28, 0.30"},
         {"SHIELDS",        "388,382,504,476, 22,-26, 0.24"},
         {"RIGHT",          "504,342,640,478, 44,-22, 0.28"},
-        {"MISSILES",       "516,0,640,140,   34, 22, 0.24"}};   // top right: missile / gun VDWs (max 8 panels)
+        {"MISSILES",       "516,0,640,124,   34, 22, 0.24"},   // top right window
+        {"GUNS",           "520,124,640,272, 40,  0, 0.24"}};  // right middle: guns VDW (max 12 panels)
     s_nPanels = 0;
     for (auto& d : kPanelDefaults) {
         char key[32], b[160]; sprintf_s(key, "PANEL_%s", d[0]);
@@ -1186,11 +1201,16 @@ void Vr_Start(const char* ini, LogFn log) {
         float az = 0, el = 0, r = radius;
         int n = sscanf_s(b, "%f , %f , %f , %f , %f , %f , %f , %f", &hp.r[0], &hp.r[1], &hp.r[2], &hp.r[3], &az, &el, &hp.width, &r);
         if (n < 7) { if (strcmp(b, "0") && *b) Log("[vr] %s ignored (need 7 or 8 numbers): %s", key, b); continue; }
-        if (hp.r[2] <= hp.r[0] || hp.r[3] <= hp.r[1] || hp.width <= 0 || r <= 0 || s_nPanels >= 8) { Log("[vr] %s ignored (bad rectangle/width/radius)", key); continue; }
+        if (hp.r[2] <= hp.r[0] || hp.r[3] <= hp.r[1] || hp.width <= 0 || r <= 0 || s_nPanels >= MAX_PANELS) { Log("[vr] %s ignored (bad rectangle/width/radius)", key); continue; }
         float ra = az * 0.0174533f, re = el * 0.0174533f;
         hp.pos[0] = r * sinf(ra) * cosf(re); hp.pos[1] = r * sinf(re); hp.pos[2] = -r * cosf(ra) * cosf(re);
         hp.yaw = -az; hp.pitch = -el;                                  // face the centre
         s_panels[s_nPanels++] = hp;
+    }
+    // a panel overlapping the top of a later one (e.g. an older PANEL_MISSILES reaching into GUNS) gives it that strip
+    for (int i = 0; i < s_nPanels; i++) for (int j = i + 1; j < s_nPanels; j++) {
+        float* a = s_panels[i].r; const float* b = s_panels[j].r;
+        if (a[0] < b[2] && b[0] < a[2] && a[1] < b[1] && a[3] > b[1]) { Log("[vr] PANEL_%s bottom %.0f -> %.0f (PANEL_%s below)", s_panels[i].name, a[3], b[1], s_panels[j].name); a[3] = b[1]; }
     }
     Log("[vr] HUD panels %s (%d)", s_panelsOn ? "on" : "off", s_nPanels);
     CreateThread(nullptr, 0, VrThread, nullptr, 0, nullptr);

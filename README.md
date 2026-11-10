@@ -108,7 +108,7 @@ On the menu, base, PAD and film screens:
 The game's enhancement layer has its own joystick configuration tool, and the mod works with it:
 
 1. Plug in the joystick and start the game (VR or flat).
-2. In the game's **Options**, set the control method to **Joystick** (or **Joystick + throttle**).
+2. In the game's **Options**, set the control method to **Joystick** (or **Joystick + throttle** for a throttle axis): your Alt+J mapping applies only in that mode.
 3. Press **Alt+J** in the game to open the joystick tool.
    - It opens **on the desktop monitor**, not in the headset.
    - Meanwhile the headset shows *"Use the desktop to configure the joystick"*.

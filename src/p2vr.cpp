@@ -609,6 +609,22 @@ static void UpdateHudRemap() {
 }
 extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
     g_frameDone = true;
+    if (g_lastCol && Vr_Active()) {   // which HUD panels hold something this frame (closed windows: no compositor layer)
+        br_pixelmap* gc = (br_pixelmap*)g_lastCol;
+        static int rects[12][4]; int n = Vr_GetPanelRects(rects, 12);
+        if (n && gc->width == 640 && gc->height == 480) {
+            uint32_t mask = 0;
+            for (int k = 0; k < n; k++) {
+                const int* r = rects[k]; bool any = false;
+                for (int y = r[1]; y < r[3] && y < 480 && !any; y += 2) {
+                    const uint8_t* row = gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x;
+                    for (int x = r[0]; x < r[2] && x < 640; x += 2) if (row[x]) { any = true; break; }
+                }
+                if (any) mask |= 1u << k;
+            }
+            Vr_SetPanelMask(mask);
+        }
+    }
     if (g_retInEyes && g_lastCol) {   // crosshair source for the next frames' eye images
         br_pixelmap* gc = (br_pixelmap*)g_lastCol;
         if (gc->width == 640 && gc->height == 480) {
@@ -1389,6 +1405,45 @@ static void ReleaseVrKeys() {
     for (int i = 0; i < kVrCommandCount; i++) if (g_prevButtons & (1ull << i)) CommandKey(i, false);
     g_prevButtons = 0;
 }
+// A joystick / HOTAS stick is deflected: its X, Y or rudder/twist (R) axis away from centre (winmm; the throttle,
+// usually Z or a slider, rests anywhere and is not looked at). The game's joystick layer (p2den, set up with Alt+J) feeds
+// the stick into the flight controls whatever the game's control method, so this decides when its values pass through.
+struct JoyDev { UINT id; JOYCAPSA caps; };
+static const std::vector<JoyDev>& JoyDevices() {
+    static std::vector<JoyDev> devs; static DWORD lastScan;
+    if (!lastScan || GetTickCount() - lastScan > 3000) {   // (re)list the connected devices
+        lastScan = GetTickCount(); devs.clear();
+        UINT n = joyGetNumDevs();
+        for (UINT j = 0; j < n && j < 16; j++) {
+            JOYINFOEX ji = {sizeof ji, JOY_RETURNALL}; if (joyGetPosEx(j, &ji) != JOYERR_NOERROR) continue;
+            JoyDev d = {j}; if (joyGetDevCapsA(j, &d.caps, sizeof d.caps) == JOYERR_NOERROR) devs.push_back(d);
+        }
+    }
+    return devs;
+}
+// a connected joystick that has a p2den mapping (controllers\<vid><pid>_*.joy, made with Alt+J): not e.g. a virtual gamepad
+static bool JoystickConfigured() {
+    static DWORD last; static bool configured;
+    if (last && GetTickCount() - last < 3000) return configured;
+    last = GetTickCount(); configured = false;
+    for (auto& dv : JoyDevices()) {
+        char pat[MAX_PATH]; sprintf_s(pat, "%s\\controllers\\%04x%04x_*.joy", g_dir, dv.caps.wMid, dv.caps.wPid);
+        WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) { FindClose(h); configured = true; }
+    }
+    return configured;
+}
+static bool JoystickDeflected() {
+    const auto& devs = JoyDevices();
+    auto off = [](DWORD v, UINT lo, UINT hi) { float h = (hi - lo) * 0.5f; return h > 0 && fabsf(((float)v - lo - h) / h) > 0.12f; };
+    for (auto& d : devs) {
+        JOYINFOEX ji = {sizeof ji, JOY_RETURNX | JOY_RETURNY | JOY_RETURNR};
+        if (joyGetPosEx(d.id, &ji) != JOYERR_NOERROR) continue;
+        if (off(ji.dwXpos, d.caps.wXmin, d.caps.wXmax) || off(ji.dwYpos, d.caps.wYmin, d.caps.wYmax)) return true;
+        if ((d.caps.wCaps & JOYCAPS_HASR) && off(ji.dwRpos, d.caps.wRmin, d.caps.wRmax)) return true;
+    }
+    return false;
+}
 // Once per game cycle (game thread): compute the values the roll-write hook puts into the flight controls.
 static void UpdateControlMode() {
     VrControls c = {};
@@ -1404,11 +1459,22 @@ static void UpdateControlMode() {
     g_yawValue   = -c.yaw * g_yawGain;
     g_rollValue  = -c.roll * g_rollGain * (g_invertRoll ? -1.f : 1.f);
     g_rollActive = true;
-    // Joystick pass-through: with the game's control method set to joystick (0x52e062 low bits 1 or 2), an axis is only
-    // overridden while its VR stick is deflected, so a joystick configured in p2den (Alt+J) keeps working alongside.
-    bool pass = g_joyPass && (*(uint8_t*)ADDR_CTRL_METHOD & 3) != 0;
+    // Joystick pass-through: an axis is only overridden while its VR stick is deflected, so a joystick configured in p2den
+    // (Alt+J) works alongside. With the game's control method set to joystick (0x52e062 low bits 1 or 2) always; with the
+    // mouse method while a joystick stick is deflected (otherwise the VR values, centred, keep a parked mouse from steering).
+    int method = *(uint8_t*)ADDR_CTRL_METHOD & 3;
+    bool joyMoved = g_joyPass && JoystickDeflected();
+    bool pass = g_joyPass && (method != 0 || joyMoved);
     g_pitchOn = !pass || c.pitch != 0; g_yawOn = !pass || c.yaw != 0; g_rollOn = !pass || c.roll != 0;
-    {   static int lastPass = -1; if ((int)pass != lastPass) { lastPass = pass; Log("[ctl] joystick pass-through %s (control method %d)", pass ? "on" : "off", *(uint8_t*)ADDR_CTRL_METHOD & 3); } }
+    if (joyMoved) {   // diagnostic: what the game's flight controls hold while the joystick is used
+        static DWORD lastJoyLog;
+        if (GetTickCount() - lastJoyLog > 2000) { lastJoyLog = GetTickCount();
+            Log("[ctl] joystick deflected: game axes pitch %.2f yaw %.2f roll %.2f | VR override pitch %d yaw %d roll %d",
+                *(float*)(entry + 0x12a8), *(float*)(entry + 0x12b0), *(float*)(entry + 0x12ac), g_pitchOn, g_yawOn, g_rollOn); }
+    }
+    {   static int lastPass = -1; if ((int)pass != lastPass) { lastPass = pass;
+            Log("[ctl] joystick pass-through %s (control byte %02x: %s, joystick %s)", pass ? "on" : "off", *(uint8_t*)ADDR_CTRL_METHOD,
+                method ? "joystick" : "mouse", joyMoved ? "deflected" : "centred"); } }
     // throttle: follow the game's setting unless the throttle stick / speed-zero is used
     if (maxSpd > 0 && c.throttleRate != 0) {   // (speed keys like "speed to zero" are the game's own commands)
         if (!g_speedActive) { g_throttle = *(float*)(entry + 0x1298) / maxSpd; }
@@ -1548,7 +1614,19 @@ static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
     static DWORD posTick; static int mx = -1, my = -1;
     DWORD now = GetTickCount();
     if (now != posTick) { posTick = now; CursorGamePos(&mx, &my); }
-    if (mx < 0 || !view) return;
+    if (!view) return;
+    static DWORD bestTick; static int bestMag = 1 << 30;
+    // known cursor draws: the PAD (0x4364fd, sprite at the PAD pointer) and the nav map (0x45b6d8, sprite 0x34 at its
+    // pointer game+0x13e/0x140): their view origin is the offset, whatever the pointer does (in the Joystick control
+    // method the nav pointer also follows the stick, so it is not always exactly on the mouse)
+    if (ret == 0x436502 || ret == 0x45b6dd) {
+        Vr_SetCursorOffset(view[1], view[2]); bestTick = now; bestMag = 0;
+        static uint32_t lastKnown; static int lastKx = -1, lastKy = -1;
+        if (ret != lastKnown || view[1] != lastKx || view[2] != lastKy) { lastKnown = ret; lastKx = view[1]; lastKy = view[2];
+            Log("[cursor] %s cursor, view at (%d,%d): VR pointer offset (%d,%d)", ret == 0x436502 ? "PAD" : "nav map", view[1], view[2], view[1], view[2]); }
+        return;
+    }
+    if (mx < 0) return;
     struct Site { uint32_t ret; int x, y; DWORD moved; int dx, dy, stable; bool rest; int px, py, pdx, pdy; bool confirmed; int ox, oy; };
     static Site sites[128]; static int nSites;
     Site* s = nullptr;
@@ -1576,7 +1654,6 @@ static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
         if (xy[0] == s->px && xy[1] == s->py) return;              // same resting place: wait for a second one
         s->confirmed = true;
     }
-    static DWORD bestTick; static int bestMag = 1 << 30;
     int mag = abs(dx) + abs(dy);
     if (now - bestTick < 3000 && mag > bestMag) return;             // a closer follower (the cursor itself) is active
     bestTick = now; bestMag = mag;
@@ -2015,12 +2092,12 @@ static void InstallHooks() {
     bool g1 = false, g2 = false;
     {   const uint8_t* q = (const uint8_t*)ADDR_JOYNORM_CALL;
         Log("[ctl] joystick call site bytes: %02x %02x %02x %02x %02x", q[0], q[1], q[2], q[3], q[4]); }
-    if (*(uint8_t*)ADDR_JOYNORM_CALL == 0xE8) {   // chain to whatever it calls now (p2den may have redirected it)
+    // The joystick normaliser call (p2den redirects it to its own joystick code) is left alone: hooking it (an extra
+    // return address on the stack) stopped the joystick reaching the flight controls. The VR axes are written later,
+    // at 0x4503f6 (HookRollWrite).
+    if (*(uint8_t*)ADDR_JOYNORM_CALL == 0xE8) {
         g_joyNormFn = ADDR_JOYNORM_CALL + 5 + *(int32_t*)(ADDR_JOYNORM_CALL + 1);
-        Log("[ctl] joystick normaliser call target %08x%s", (unsigned)g_joyNormFn, g_joyNormFn == ADDR_JOYNORM_FN ? " (game)" : " (redirected)");
-        DWORD old; VirtualProtect((void*)ADDR_JOYNORM_CALL, 5, PAGE_EXECUTE_READWRITE, &old);
-        *(int32_t*)(ADDR_JOYNORM_CALL + 1) = (int32_t)((uintptr_t)HookJoyNormCall - (ADDR_JOYNORM_CALL + 5));
-        VirtualProtect((void*)ADDR_JOYNORM_CALL, 5, old, &old); g1 = true;
+        Log("[ctl] joystick normaliser call target %08x%s (not hooked)", (unsigned)g_joyNormFn, g_joyNormFn == ADDR_JOYNORM_FN ? " (game)" : " (p2den)");
     }
     static const uint8_t rollBytes[7] = {0x80, 0x3D, 0x63, 0xE0, 0x52, 0x00, 0x00};
     if (!memcmp((void*)ADDR_ROLL_PATCH, rollBytes, 7)) {

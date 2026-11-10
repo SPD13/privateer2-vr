@@ -39,7 +39,9 @@ struct VrControls {
 bool Macro_Replaying();
 void Macro_Abort(const char* why);   // stop a running replay            // macro.cpp: a recorded input sequence (e.g. AUTOPLAY) is being replayed
 void Vr_SetCursorOffset(int x, int y);   // game pixels: the screen draws its cursor this far right/down of the mouse
-void Vr_ShowMessage(int which);   // 0 none, 1 "Entering space" prompt (world-fixed panel instead of the scene)
+void Vr_ShowMessage(int which);
+int Vr_GetPanelRects(int (*r)[4], int max);   // HUD panel rectangles (640x480 HUD pixels); 0 when panels are off
+void Vr_SetPanelMask(uint32_t mask);          // bit per panel: something is drawn in it this frame   // 0 none, 1 "Entering space" prompt (world-fixed panel instead of the scene)
 bool Vr_GetControls(VrControls* c);
 void Vr_Haptic(int hand, float amplitude, float seconds);   // hand 0 left, 1 right, 2 both; amplitude 0..1
 void Vr_SetReticleDistance(float metres);   // depth of what is under the crosshair (<= 0: use RETICLE_DIST)

@@ -85,7 +85,7 @@ At 0.8 m, 0.1 m of width covers about 7° of view; keep neighbouring panels' azi
 
 Keep rectangles tight around their window: the HUD's direction arrows circle the crosshair at about 100 px (roughly x 220–420, y 140–340), and any part of an arrow inside a panel rectangle is shown on that panel, splitting the arrow between two places.
 
-Default panels (names are fixed; at most 8 panels):
+Default panels (names are fixed). A panel only takes a compositor layer while something is drawn in it, e.g. the guns window only while it is open, so closed windows leave the layers to the 3D markers:
 
 | Panel | HUD content | Default value |
 |---|---|---|
@@ -96,7 +96,8 @@ Default panels (names are fixed; at most 8 panels):
 | `PANEL_RADAR` | Radar and the bars below it | `254,346,388,478, 0,-28, 0.30` |
 | `PANEL_SHIELDS` | Your own ship's shield/armour ring (right of the radar) | `388,382,504,476, 22,-26, 0.24` |
 | `PANEL_RIGHT` | Right VDU area (bottom right) | `504,342,640,478, 44,-22, 0.28` |
-| `PANEL_MISSILES` | Missile / gun VDW window (top right) | `516,0,640,140, 34,22, 0.24` |
+| `PANEL_MISSILES` | Top-right window | `516,0,640,124, 34,22, 0.24` |
+| `PANEL_GUNS` | Guns window (right, middle) | `520,124,640,272, 40,0, 0.24` |
 
 A malformed value is ignored and reported in `p2vr.log` (`[vr] PANEL_... ignored`). Each panel is one OpenXR composition layer; if the runtime's layer limit (16 on SteamVR) is reached, target markers are dropped before panels.
 
@@ -138,7 +139,7 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 | `INVERT_ROLL` | `0` | Invert the roll direction. |
 | `ROLL_GAIN` | `2.5` | Roll rate multiplier. |
 | `THROTTLE_RATE` | `0.6` | Throttle change per second at full left-stick deflection (0..1 of max speed per second). The throttle follows the game's own setting until you move the stick. |
-| `JOYSTICK_PASSTHROUGH` | `1` | Use a joystick / HOTAS together with the VR controllers. Requires the game's control method to be set to *Joystick* (or *Joystick + throttle*) in the game options; the joystick's axes and buttons are configured with p2den's in-game tool (**Alt+J**). Each axis (pitch, yaw, roll) is then only taken from the VR thumbsticks while they are deflected; otherwise the joystick's value is used. The throttle follows the joystick unless the VR throttle stick is moved. In mouse mode nothing changes (the VR sticks always drive the ship, so a parked mouse cannot cause drift). `0` = VR sticks always override. |
+| `JOYSTICK_PASSTHROUGH` | `1` | Use a joystick / HOTAS together with the VR controllers. The joystick's axes and buttons are configured with p2den's in-game tool (**Alt+J**). Each axis (pitch, yaw, roll) is taken from the VR thumbsticks only while they are deflected; otherwise the joystick's value is used. The throttle follows the joystick unless the VR throttle stick is moved. For the joystick's Alt+J mapping (axes and buttons) to apply, set the game's control method to *Joystick* (or *Joystick + throttle*) in the game options. With *Mouse*, the joystick passes through only while its stick (X, Y or twist axis) is out of centre. `0` = VR sticks always override. |
 | `KEY_<COMMAND>` | per command | Override the game key a command presses, as a DirectInput scancode in decimal. `<COMMAND>` is the action name in upper case, e.g. `KEY_FIRE_GUNS=57` (Space), `KEY_JUMP=36` (J). Commands flagged with Alt in `commands.h` keep their Alt modifier. |
 
 ## Controller rumble
