@@ -1219,10 +1219,10 @@ void Vr_Start(const char* ini, LogFn log) {
     float radius = IniF(ini, "PANEL_RADIUS", 0.8f);
     static const char* kPanelDefaults[][2] = {
         {"VELOCITY",       "236,0,406,58,     0, 24, 0.36"},   // from the top: camera-view labels ("OBSERVER VIEW") at y 3..7
-        {"COMMS",          "0,0,124,140,    -34, 22, 0.24"},   // windows only: the direction arrows circle the crosshair at ~100 px
+        {"COMMS",          "0,0,124,190,    -34, 18, 0.24"},   // with the reply options listed below the window   // windows only: the direction arrows circle the crosshair at ~100 px
         {"TARGET",         "2,342,120,478,  -44,-22, 0.28"},
         {"TARGET_SHIELDS", "138,382,254,476,-22,-26, 0.24"},
-        {"RADAR",          "254,346,388,478,  0,-28, 0.30"},
+        {"RADAR",          "254,338,388,478,  0,-28, 0.30"},   // with the "REWARD n CR" line above it
         {"SHIELDS",        "388,382,504,476, 22,-26, 0.24"},
         {"RIGHT",          "504,342,640,478, 44,-22, 0.28"},
         {"MISSILES",       "516,0,640,124,   34, 22, 0.24"},   // top right window

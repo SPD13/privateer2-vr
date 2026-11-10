@@ -16,6 +16,7 @@ static LogFn Log;
 static char s_path[MAX_PATH];
 static LARGE_INTEGER s_qpf, s_t0;
 static volatile bool s_recording, s_replaying, s_abort;
+static volatile DWORD s_macroEscTick;   // when the replay last pressed Esc itself
 static double s_lastMove;
 
 struct Ev { double t; char type; int a, b, c; };   // K: scan, flags(1=up,2=ext), vk | M: x*10000, y*10000 | B: button, down | W: delta
@@ -101,6 +102,7 @@ static DWORD WINAPI ReplayThread(LPVOID) {
         }
         if (e.type == 'B' && e.b) Log("[macro] click %d at %.1f s (button %d)", ++clicks, e.t + shift, e.a);
         if (e.type == 'K' && !(e.b & 1)) Log("[macro] key vk %d at %.1f s", e.c, e.t + shift);
+        if (e.type == 'K' && (e.c == VK_ESCAPE || e.a == 0x01)) s_macroEscTick = GetTickCount();   // its own Esc: not an abort
         INPUT in = {};
         if (e.type == 'K') {
             in.type = INPUT_KEYBOARD; in.ki.wScan = (WORD)e.a;
@@ -162,7 +164,8 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             } else StartReplay();
             return 1;   // swallow the hotkey
         }
-        if (s_replaying && !injected && !up && k->vkCode == VK_ESCAPE) { Macro_Abort("Esc pressed"); return 1; }
+        // (an Esc of the replay itself can come back without the injected flag, re-sent by another input layer: ignored)
+        if (s_replaying && !injected && !up && k->vkCode == VK_ESCAPE && GetTickCount() - s_macroEscTick > 600) { Macro_Abort("Esc pressed"); return 1; }
         // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
         if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }

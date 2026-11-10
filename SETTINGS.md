@@ -90,10 +90,10 @@ Default panels (names are fixed). A panel only takes a compositor layer while so
 | Panel | HUD content | Default value |
 |---|---|---|
 | `PANEL_VELOCITY` | Velocity readout and bars (top centre), and the camera-view labels above them ("OBSERVER VIEW"…) | `236,0,406,58, 0,24, 0.36` |
-| `PANEL_COMMS` | Comms window (top left) | `0,0,124,140, -34,22, 0.24` |
+| `PANEL_COMMS` | Comms window (top left) and the reply options listed below it | `0,0,124,190, -34,18, 0.24` |
 | `PANEL_TARGET` | Target VDU (bottom left) | `2,342,120,478, -44,-22, 0.28` |
 | `PANEL_TARGET_SHIELDS` | Target's shield/armour ring (left of the radar) | `138,382,254,476, -22,-26, 0.24` |
-| `PANEL_RADAR` | Radar and the bars below it | `254,346,388,478, 0,-28, 0.30` |
+| `PANEL_RADAR` | Radar, the bars below it and the "REWARD n CR" line above it | `254,338,388,478, 0,-28, 0.30` |
 | `PANEL_SHIELDS` | Your own ship's shield/armour ring (right of the radar) | `388,382,504,476, 22,-26, 0.24` |
 | `PANEL_RIGHT` | Right VDU area (bottom right) | `504,342,640,478, 44,-22, 0.28` |
 | `PANEL_MISSILES` | Top-right window | `516,0,640,124, 34,22, 0.24` |
