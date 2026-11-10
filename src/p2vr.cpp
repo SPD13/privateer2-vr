@@ -1580,9 +1580,13 @@ extern "C" void __cdecl ApplyStick() {}
 //             table 0x4cdadc[here * 0xe2 + destination] (here = short +0x13b2, destination = short +0x13b4, picked on the nav
 //             map); with the flag set it goes straight to the destination (the game clears the flag after the jump and
 //             sends the escorts the same way)
-enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_JUMP, CHEAT_COUNT };
-static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE", "JUMP"};
-static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible", "cheat_jump_direct"};
+//   land now: the flight loop lands the player as soon as game+0x1144 (landing location) is not -1 (FUN_00438137: location
+//             -> 0x52d280, then the session ends and the base follows). The game sets it after the approach and comms:
+//             FUN_0043bf47 (cleared, +0x117c == 2, within 600 of the nearest base +0x278f4 of the area: base + 0x12; base 0:
+//             0x12 when 0x52d2a8) and FUN_0044b180 (planet, cleared: +0x278fc). The cheat sets the same value directly.
+enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_JUMP, CHEAT_LAND, CHEAT_COUNT };
+static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE", "JUMP", "LAND"};
+static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible", "cheat_jump_direct", "cheat_land"};
 static bool g_cheats = true; static int g_cheatButton[CHEAT_COUNT]; static bool g_invincible; static int g_savedInvuln;
 static void GameDamage(uint8_t* game, int ship, int damage) {
     __asm {
@@ -1653,6 +1657,15 @@ static void DoCheat(int which) {
         if (g_invincible) g_savedInvuln = *(int*)(g_game + 0x27d0c); else *(int*)(g_game + 0x27d0c) = g_savedInvuln;
         Log("[cheat] invincible %s", g_invincible ? "on" : "off");
         break;
+    case CHEAT_LAND: {
+        int base = *(int*)(g_game + 0x278f4), planet = *(int*)(g_game + 0x278fc), where = -1;
+        if (base >= 1 && base <= 0x10) where = base + 0x12;                     // a station / base in this area
+        else if (base == 0 && *(int*)0x52d2a8 != 0) where = 0x12;               // the special base 0, when the game allows it
+        else if (planet != -1) where = planet;                                  // a planet
+        if (where < 0) { Log("[cheat] land now: nowhere to land in this area (base %d, planet %d)", base, planet); break; }
+        *(int*)(g_game + 0x1144) = where;
+        Log("[cheat] land now: landing at location %d (base %d, planet %d)", where, base, planet);
+        break; }
     case CHEAT_JUMP: {
         int here = *(int16_t*)(me + 0x13b2), dest = *(int16_t*)(me + 0x13b4);
         if (dest < 0 || dest >= 0xe2 || here < 0 || here >= 0xe2 || dest == here) {

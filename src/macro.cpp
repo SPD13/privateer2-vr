@@ -171,7 +171,7 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
             return 1;
         }
-        if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '6') {   // cheat hotkeys Ctrl+1..6
+        if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '7') {   // cheat hotkeys Ctrl+1..7
             if (!up) InterlockedOr(&s_cheatKeys, 1 << (k->vkCode - '1'));
             return 1;
         }
