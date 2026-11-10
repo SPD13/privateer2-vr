@@ -126,6 +126,50 @@ The game's own keyboard controls all work. The mod adds:
 | Ctrl+F12 | Recenter the view |
 | Ctrl+F2 / Ctrl+F3 | Record / replay an input macro (testing) |
 | Ctrl+F9 | Save debug images of the current frame |
+| Ctrl+1 … Ctrl+5 | Cheats, see [Cheats](#cheats) |
+
+## Cheats
+
+The mod adds five cheats for flying (they only work in space, not in menus or bases):
+
+| Cheat | What it does | Keyboard |
+|---|---|---|
+| **Restore shield and armor** | Shields and armour of all four sides of your ship back to full, and the hull armour condition (the *Armour* bar of the damage window) back to 100 %. | Ctrl+1 |
+| **Destroy target** | The ship you have targeted explodes. It counts as your kill, with the usual bounty. | Ctrl+2 |
+| **Destroy all enemies** | Every hostile ship in your area explodes, and any ship that is targeting you. Friendly and neutral ships are left alone. | Ctrl+3 |
+| **Get cash** | +100,000 credits, shown with the game's own credit message. | Ctrl+4 |
+| **Invincible** | Your ship takes no damage. Press again to turn it off. | Ctrl+5 |
+
+Ships the game itself treats as indestructible are not affected by the destroy cheats.
+
+### Using them
+
+- **Keyboard:** press **Ctrl+1** to **Ctrl+5** in flight. The mod catches these keys while the game window is in front, so the game itself does not react to them.
+- **VR controllers:** each cheat is a SteamVR action, with no button assigned by default:
+  1. Start the game in VR.
+  2. Open *SteamVR > Settings > Controllers > Manage Controller Bindings* and choose **Privateer 2 VR**.
+  3. Edit the current binding, and assign a button to any of these actions:
+     - `[CHEAT] Restore shield and armor`
+     - `[CHEAT] Destroy target`
+     - `[CHEAT] Destroy all enemies`
+     - `[CHEAT] Get cash (+100,000 credits)`
+     - `[CHEAT] Invincible (toggle)`
+- **Joystick or HOTAS:** the game's Alt+J joystick tool can't list extra commands, so joystick buttons for the cheats are set in `p2vr.ini` in the game folder:
+  1. Find the button number in Windows: *Set up USB game controllers* (`joy.cpl`) > your joystick > *Properties*. Press the button and note the number that lights up.
+  2. Set it for the cheat you want, for example:
+     ```ini
+     CHEAT_RESTORE_BUTTON=5
+     CHEAT_DESTROY_TARGET_BUTTON=6
+     CHEAT_DESTROY_ENEMIES_BUTTON=0
+     CHEAT_CASH_BUTTON=0
+     CHEAT_INVINCIBLE_BUTTON=7
+     ```
+     `0` means no button. Any connected joystick's button with that number triggers the cheat.
+  3. In the Alt+J tool, leave those buttons on *None*, so they don't also send a game command.
+
+### Turning cheats off
+
+Set `CHEATS=0` in `p2vr.ini` to disable all of them: keys, VR actions and joystick buttons. All the settings are described in [SETTINGS.md](SETTINGS.md#cheats).
 
 ## Settings (`p2vr.ini`)
 

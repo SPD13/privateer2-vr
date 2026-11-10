@@ -140,6 +140,7 @@ static void StartReplay() {
     CreateThread(nullptr, 0, ReplayThread, nullptr, 0, nullptr);
 }
 
+static volatile LONG s_cheatKeys;   // cheat hotkeys (Ctrl+1..5) pressed, see Macro_TakeCheatKeys
 static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
         auto* k = (KBDLLHOOKSTRUCT*)lp;
@@ -165,6 +166,10 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
         // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
         if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
+            return 1;
+        }
+        if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '5') {   // cheat hotkeys Ctrl+1..5
+            if (!up) InterlockedOr(&s_cheatKeys, 1 << (k->vkCode - '1'));
             return 1;
         }
         if (s_recording && !injected && GameHasFocus() && k->vkCode != VK_F2 && k->vkCode != VK_F3)
@@ -221,6 +226,8 @@ static DWORD WINAPI HookThread(LPVOID autoplay) {
 }
 
 bool Macro_Replaying() { return s_replaying; }
+// cheat hotkeys pressed since the last call (bit 0 = Ctrl+1 ... bit 4 = Ctrl+5)
+int Macro_TakeCheatKeys() { return (int)InterlockedExchange(&s_cheatKeys, 0); }
 // Esc pressed by the player (keyboard or VR controller) while a replay runs: the sequence went wrong -> stop it
 void Macro_Abort(const char* why) {
     if (!s_replaying || s_abort) return;

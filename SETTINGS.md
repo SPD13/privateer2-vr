@@ -153,6 +153,27 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 
 The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so they can be reassigned in the SteamVR binding screen.
 
+## Cheats
+
+Five cheats, in flight only:
+
+| Cheat | Keyboard | SteamVR action | Joystick setting |
+|---|---|---|---|
+| Restore shield and armor: shields and armour of all four sides to full, hull armour condition to 100 % | Ctrl+1 | `[CHEAT] Restore shield and armor` | `CHEAT_RESTORE_BUTTON` |
+| Destroy target: the ship you have targeted explodes, as a kill of yours (kill count and bounty) | Ctrl+2 | `[CHEAT] Destroy target` | `CHEAT_DESTROY_TARGET_BUTTON` |
+| Destroy all enemies: every hostile ship in your area, and any ship targeting you | Ctrl+3 | `[CHEAT] Destroy all enemies` | `CHEAT_DESTROY_ENEMIES_BUTTON` |
+| Get cash: +100,000 credits, with the game's credit message | Ctrl+4 | `[CHEAT] Get cash (+100,000 credits)` | `CHEAT_CASH_BUTTON` |
+| Invincible (toggle): your ship takes no damage until toggled off | Ctrl+5 | `[CHEAT] Invincible (toggle)` | `CHEAT_INVINCIBLE_BUTTON` |
+
+- **Keyboard:** Ctrl+1 … Ctrl+5 are taken by the mod while the game window is in front, so the game does not see them.
+- **VR controllers:** the SteamVR actions have no default binding. Bind them in *SteamVR > Settings > Controllers > Manage Controller Bindings > Privateer 2 VR*.
+- **Joystick:** p2den's Alt+J tool cannot list extra commands, so joystick buttons are set here. Use the Windows button number, as shown in Windows' *Game Controllers* properties (button 1 = 1). It works on any connected joystick. A button used for a cheat should be left unmapped (*None*) in Alt+J.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `CHEATS` | `1` | `0` = all cheats off (keys, VR actions and joystick buttons). |
+| `CHEAT_<NAME>_BUTTON` | `0` | Joystick button for that cheat (`<NAME>` = `RESTORE`, `DESTROY_TARGET`, `DESTROY_ENEMIES`, `CASH`, `INVINCIBLE`). `0` = none. |
+
 ## Testing automation
 
 | Setting | Default | Effect |

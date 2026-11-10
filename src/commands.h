@@ -67,6 +67,12 @@ static const VrCommand kVrCommands[] = {
     {"view_target_chase",  "Target chase camera",              0x42, false, nullptr, nullptr, nullptr},
     {"view_fixed",         "Fixed camera",                     0x43, false, nullptr, nullptr, nullptr},
     {"view_flyby",         "Fly-by cinematic",                 0x44, false, nullptr, nullptr, nullptr},
+    // --- cheats (scancode 0: run by p2vr, see RunCheats; no default binding)
+    {"cheat_restore",      "[CHEAT] Restore shield and armor", 0, false, nullptr, nullptr, nullptr},
+    {"cheat_destroy_target", "[CHEAT] Destroy target",         0, false, nullptr, nullptr, nullptr},
+    {"cheat_destroy_enemies", "[CHEAT] Destroy all enemies",   0, false, nullptr, nullptr, nullptr},
+    {"cheat_cash",         "[CHEAT] Get cash (+100,000 credits)", 0, false, nullptr, nullptr, nullptr},
+    {"cheat_invincible",   "[CHEAT] Invincible (toggle)",      0, false, nullptr, nullptr, nullptr},
 };
 static const int kVrCommandCount = (int)(sizeof kVrCommands / sizeof kVrCommands[0]);
 static_assert(sizeof kVrCommands / sizeof kVrCommands[0] <= 64, "commands are a 64-bit mask");

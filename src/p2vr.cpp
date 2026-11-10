@@ -1468,6 +1468,7 @@ static void SendKey(uint8_t sc, bool down) {
 }
 static bool GameInFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
 static void CommandKey(int i, bool down) {   // the game's key for a command, with left Alt where needed
+    if (!g_keyFor[i]) return;                                   // no game key (cheats)
     if (down) { if (g_altFor[i]) SendKey(0x38, true); SendKey(g_keyFor[i], true); }
     else { SendKey(g_keyFor[i], false); if (g_altFor[i]) SendKey(0x38, false); }
 }
@@ -1556,11 +1557,120 @@ static void UpdateControlMode() {
     bool front = GameInFront();
     for (int i = 0; i < kVrCommandCount; i++) {
         bool down = front && ((c.buttons >> i) & 1), was = (g_prevButtons >> i) & 1;
-        if (down != was) CommandKey(i, down);
+        if (down != was && g_keyFor[i]) CommandKey(i, down);   // (scancode 0: a cheat, see RunCheats)
     }
     g_prevButtons = front ? c.buttons : 0;
 }
 extern "C" void __cdecl ApplyStick() {}
+
+// ---------------------------------------------------------------- cheats
+// Triggered by Ctrl+1..5 (keyboard), the SteamVR actions "[CHEAT] ..." (commands.h, bindable in SteamVR) or joystick buttons
+// (p2vr.ini CHEAT_<NAME>_BUTTON = Windows button number, any connected joystick). Run on the game thread each flight frame.
+//   restore:  shields and armour of the 4 sides to the ship type's maximum (0x4c694e / 0x4c6952 + type*0x48), hull armour
+//             condition (game+0x27896, 0..255) to 255
+//   destroy:  the game's damage function FUN_0044d98c (eax game, edx ship, ebx damage, ecx side or -1) after setting the
+//             ship's shields to 0 and armour to 1, with the player as attacker (+0x1222): explosion, kill count and bounty
+//             as for a real kill
+//   enemies:  ships 29..148 in the player's area (+0x13b2 == 0x52e2fc), targetable type, not dying (+0x12ee & 0x20), and
+//             hostile (attitude short +0x12dc >= 4, or 3 while 0x542288 >= 1, as "target nearest hostile") or targeting
+//             the player
+//   cash:     FUN_004469e0 (eax game, edx amount): adds to the credits (0x52e23c) and shows the game's credit message
+//   invincible (toggle): game+0x27d0c held at 0, which the damage function treats as "the player takes no damage"
+enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_COUNT };
+static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE"};
+static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible"};
+static bool g_cheats = true; static int g_cheatButton[CHEAT_COUNT]; static bool g_invincible; static int g_savedInvuln;
+static void GameDamage(uint8_t* game, int ship, int damage) {
+    __asm {
+        pushad
+        mov eax, game
+        mov edx, ship
+        mov ebx, damage
+        mov ecx, -1
+        mov esi, 0x44d98c
+        call esi
+        popad
+    }
+}
+static void GameAddCredits(uint8_t* game, int amount) {
+    __asm {
+        pushad
+        mov eax, game
+        mov edx, amount
+        mov esi, 0x4469e0
+        call esi
+        popad
+    }
+}
+static bool DestroyShip(int i) {
+    uint8_t* e = g_game + i * SHIP_STRIDE; int player = *(int*)(g_game + GAME_PLAYER);
+    if (i < 0 || i >= 0x95 || i == player || (*(uint8_t*)(e + 0x12ee) & 0x20)) return false;
+    for (int k = 0; k < 4; k++) { *(int16_t*)(e + 0x12de + k * 2) = 0; *(int16_t*)(e + 0x12e6 + k * 2) = 1; }
+    *(int16_t*)(e + 0x1222) = (int16_t)player;                     // the kill is the player's
+    GameDamage(g_game, i, 400);
+    return (*(uint8_t*)(e + 0x12ee) & 0x20) != 0;
+}
+static void DoCheat(int which) {
+    int player = *(int*)(g_game + GAME_PLAYER); uint8_t* me = g_game + player * SHIP_STRIDE;
+    switch (which) {
+    case CHEAT_RESTORE: {
+        int type = *(int*)(me + 0x11e6) >> 16;
+        for (int k = 0; k < 4; k++) {
+            *(int16_t*)(me + 0x12de + k * 2) = *(const int16_t*)(0x4c694e + type * 0x48);
+            *(int16_t*)(me + 0x12e6 + k * 2) = *(const int16_t*)(0x4c6952 + type * 0x48);
+        }
+        *(int16_t*)(g_game + 0x27896) = 255;
+        Log("[cheat] shields %d and armour %d restored (ship type %d)", *(const int16_t*)(0x4c694e + type * 0x48), *(const int16_t*)(0x4c6952 + type * 0x48), type);
+        break; }
+    case CHEAT_TARGET: {
+        int tgt = *(int*)(me + 0x1216) >> 16;
+        if (tgt < 0) { Log("[cheat] destroy target: no target"); break; }
+        Log("[cheat] destroy target %d: %s", tgt, DestroyShip(tgt) ? "destroyed" : "not destroyable");
+        break; }
+    case CHEAT_ENEMIES: {
+        int zone = *(int*)0x52e2fc, n = 0, tried = 0;
+        for (int i = 0x1d; i < 0x95; i++) {
+            uint8_t* e = g_game + i * SHIP_STRIDE; int type = *(int*)(e + 0x11e6) >> 16;
+            if (i == player || type == 0 || !*(const uint8_t*)(0x4c6918 + type * 0x48) || (*(int*)(e + 0x13b0) >> 16) != zone) continue;
+            if (*(uint8_t*)(e + 0x12ee) & 0x20) continue;
+            int rel = *(int*)(e + 0x12da) >> 16;
+            bool hostile = rel >= 4 || (rel == 3 && *(int*)0x542288 >= 1) || (*(int*)(e + 0x1216) >> 16) == player;
+            if (!hostile) continue;
+            tried++; if (DestroyShip(i)) n++;
+        }
+        Log("[cheat] destroy all enemies: %d of %d destroyed", n, tried);
+        break; }
+    case CHEAT_CASH:
+        GameAddCredits(g_game, 100000);
+        Log("[cheat] +100000 credits: %d", *(int*)0x52e23c);
+        break;
+    case CHEAT_INVINCIBLE:
+        g_invincible = !g_invincible;
+        if (g_invincible) g_savedInvuln = *(int*)(g_game + 0x27d0c); else *(int*)(g_game + 0x27d0c) = g_savedInvuln;
+        Log("[cheat] invincible %s", g_invincible ? "on" : "off");
+        break;
+    }
+}
+static void RunCheats() {
+    int keys = Macro_TakeCheatKeys();
+    if (!g_cheats || !g_game) return;
+    bool down[CHEAT_COUNT] = {};
+    for (int k = 0; k < CHEAT_COUNT; k++) if ((keys >> k) & 1) down[k] = true;   // Ctrl+1..5: already edges
+    bool held[CHEAT_COUNT] = {};
+    VrControls c = {};
+    if (Vr_Active() && Vr_GetControls(&c))
+        for (int i = 0; i < kVrCommandCount; i++) if ((c.buttons >> i) & 1)
+            for (int k = 0; k < CHEAT_COUNT; k++) if (!strcmp(kVrCommands[i].action, kCheatAction[k])) held[k] = true;
+    for (auto& dv : JoyDevices()) {
+        JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS};
+        if (joyGetPosEx(dv.id, &ji) != JOYERR_NOERROR) continue;
+        for (int k = 0; k < CHEAT_COUNT; k++) if (g_cheatButton[k] > 0 && g_cheatButton[k] <= 32 && ((ji.dwButtons >> (g_cheatButton[k] - 1)) & 1)) held[k] = true;
+    }
+    static bool was[CHEAT_COUNT];
+    for (int k = 0; k < CHEAT_COUNT; k++) { if (held[k] && !was[k]) down[k] = true; was[k] = held[k]; }
+    for (int k = 0; k < CHEAT_COUNT; k++) if (down[k]) DoCheat(k);
+    if (g_invincible) *(int*)(g_game + 0x27d0c) = 0;
+}
 
 // "Entering Space in VR" prompt: on the first flight frame after a flat scene, the game thread waits (window kept
 // responsive) until the fire button is pressed and released, so the space scene starts only when the player is ready.
@@ -1592,7 +1702,9 @@ static DWORD JoyFireMask(WORD vid, WORD pid) {   // p2den .joy: header 16 bytes 
             if (n >= 16 && !memcmp(&d[4], "P2DK", 4)) {
                 uint32_t na = *(uint32_t*)&d[12]; size_t o = 16 + (size_t)na * 0x88;
                 if (o + 4 <= n) { uint32_t nb = *(uint32_t*)&d[o];
-                    for (uint32_t k = 0; k < nb && k < 32 && o + 8 + 4 * k <= n; k++) if (*(uint32_t*)&d[o + 4 + 4 * k] == 0x72) mask |= 1u << k; }
+                    // tables of nb dwords each: [0] menus, [1] in flight; values are p2den action numbers (46 = Fire Guns)
+                    size_t t1 = o + 4 + (size_t)nb * 4;
+                    for (uint32_t k = 0; k < nb && k < 32 && t1 + 4 * k + 4 <= n; k++) if (*(uint32_t*)&d[t1 + 4 * k] == 46) mask |= 1u << k; }
             }
             Log("[vr] joystick %04x:%04x mapping %s: fire buttons %08x", vid, pid, fd.cFileName, mask);
         }
@@ -1871,6 +1983,7 @@ extern "C" void __cdecl PostEnd() {
         Smooth_SetGameThread();
         if (g_newSpaceSession) { g_newSpaceSession = false; if (g_spacePrompt && Vr_Active()) WaitForSpacePrompt(); }   // mission start only
         UpdateControlMode();
+        RunCheats();
         CheckHits();
         g_lastFlightTick = GetTickCount();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
@@ -2245,6 +2358,8 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_cursorLog = GetPrivateProfileIntA("VR", "CURSOR_LOG", 0, p) != 0;
         g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
         g_joyPass = GetPrivateProfileIntA("VR", "JOYSTICK_PASSTHROUGH", 1, p) != 0;
+        g_cheats = GetPrivateProfileIntA("VR", "CHEATS", 1, p) != 0;
+        for (int k = 0; k < CHEAT_COUNT; k++) { char key[48]; sprintf_s(key, "CHEAT_%s_BUTTON", kCheatName[k]); g_cheatButton[k] = GetPrivateProfileIntA("VR", key, 0, p); }
         g_spacePrompt = GetPrivateProfileIntA("VR", "SPACE_PROMPT", 1, p) != 0;
         g_hudArrowLayer = GetPrivateProfileIntA("VR", "HUD_ARROW_LAYER", 1, p) != 0;
         GetPrivateProfileStringA("VR", "RUMBLE_GUNS", "0.35", b, 32, p); g_rumbleGuns = (float)atof(b);

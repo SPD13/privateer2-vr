@@ -37,6 +37,7 @@ struct VrControls {
     bool  anyButton;              // any button / trigger / grip held (commands and menu actions)
 };
 bool Macro_Replaying();
+int Macro_TakeCheatKeys();         // macro.cpp: Ctrl+1..5 pressed since the last call (bit per cheat)
 void Macro_Abort(const char* why);   // stop a running replay            // macro.cpp: a recorded input sequence (e.g. AUTOPLAY) is being replayed
 void Vr_SetCursorOffset(int x, int y);   // game pixels: the screen draws its cursor this far right/down of the mouse
 void Vr_ShowMessage(int which);

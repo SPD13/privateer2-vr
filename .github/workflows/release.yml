@@ -81,7 +81,7 @@ jobs:
         run: |
           $notes = "notes.md"
           $prev = git describe --tags --abbrev=0 "$env:GITHUB_REF_NAME^" 2>$null
-          "## Install`n`nDownload **P2VR-Installer.exe** and run it: it finds Privateer 2: The Darkening (30th Anniversary Edition), installs or updates the VR mod, and adds a *Privateer 2 VR* shortcut. Start SteamVR first, then the shortcut.`n" | Out-File $notes -Encoding utf8
+          "## Install`n`nDownload **P2VR-Installer.exe** and run it: it finds Privateer 2: The Darkening (30th Anniversary Edition), installs or updates the VR mod, and adds a *Privateer 2 VR* shortcut. The shortcut opens the launcher: **Play in VR** starts SteamVR when needed, then the game in the headset; **Play flat** starts the original game. The launcher also checks for updates.`n" | Out-File $notes -Encoding utf8
           if ($prev) {
             "## Changes since $prev`n" | Out-File $notes -Append -Encoding utf8
             git log --pretty=format:"- %s" "$prev..$env:GITHUB_REF_NAME" | Out-File $notes -Append -Encoding utf8
