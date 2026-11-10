@@ -73,6 +73,7 @@ static const VrCommand kVrCommands[] = {
     {"cheat_destroy_enemies", "[CHEAT] Destroy all enemies",   0, false, nullptr, nullptr, nullptr},
     {"cheat_cash",         "[CHEAT] Get cash (+100,000 credits)", 0, false, nullptr, nullptr, nullptr},
     {"cheat_invincible",   "[CHEAT] Invincible (toggle)",      0, false, nullptr, nullptr, nullptr},
+    {"cheat_jump_direct",  "[CHEAT] Jump straight to destination", 0, false, nullptr, nullptr, nullptr},
 };
 static const int kVrCommandCount = (int)(sizeof kVrCommands / sizeof kVrCommands[0]);
 static_assert(sizeof kVrCommands / sizeof kVrCommands[0] <= 64, "commands are a 64-bit mask");

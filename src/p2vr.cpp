@@ -1576,9 +1576,13 @@ extern "C" void __cdecl ApplyStick() {}
 //             the player
 //   cash:     FUN_004469e0 (eax game, edx amount): adds to the credits (0x52e23c) and shows the game's credit message
 //   invincible (toggle): game+0x27d0c held at 0, which the damage function treats as "the player takes no damage"
-enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_COUNT };
-static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE"};
-static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible"};
+//   jump direct: the player's "direct jump" flag (short +0x13b6). A jump goes to the next nav point of the route, the routing
+//             table 0x4cdadc[here * 0xe2 + destination] (here = short +0x13b2, destination = short +0x13b4, picked on the nav
+//             map); with the flag set it goes straight to the destination (the game clears the flag after the jump and
+//             sends the escorts the same way)
+enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_JUMP, CHEAT_COUNT };
+static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE", "JUMP"};
+static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible", "cheat_jump_direct"};
 static bool g_cheats = true; static int g_cheatButton[CHEAT_COUNT]; static bool g_invincible; static int g_savedInvuln;
 static void GameDamage(uint8_t* game, int ship, int damage) {
     __asm {
@@ -1649,6 +1653,14 @@ static void DoCheat(int which) {
         if (g_invincible) g_savedInvuln = *(int*)(g_game + 0x27d0c); else *(int*)(g_game + 0x27d0c) = g_savedInvuln;
         Log("[cheat] invincible %s", g_invincible ? "on" : "off");
         break;
+    case CHEAT_JUMP: {
+        int here = *(int16_t*)(me + 0x13b2), dest = *(int16_t*)(me + 0x13b4);
+        if (dest < 0 || dest >= 0xe2 || here < 0 || here >= 0xe2 || dest == here) {
+            Log("[cheat] jump direct: no destination set (here %d, destination %d)", here, dest); break; }
+        *(int16_t*)(me + 0x13b6) = 1;
+        Log("[cheat] jump direct: next jump goes from nav point %d straight to %d (the route's next stop was %d)", here, dest,
+            *(const uint8_t*)(0x4cdadc + here * 0xe2 + dest));
+        break; }
     }
 }
 static void RunCheats() {
