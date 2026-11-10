@@ -41,7 +41,7 @@ func openWindow(url string) bool {
 		WindowOptions: webview2.WindowOptions{
 			Title:  appTitle,
 			Width:  780,
-			Height: windowHeight(1240),
+			Height: windowHeight(1275),
 			IconId: 1, // the application icon (rsrc_windows_amd64.syso, see build.ps1)
 			Center: true,
 		},

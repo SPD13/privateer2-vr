@@ -765,7 +765,7 @@ func (a *app) routes(mux *http.ServeMux) {
 	// only the page's own links
 	handle("/api/open", "POST", func(w http.ResponseWriter, r *http.Request) {
 		body, err := decode(r)
-		if err != nil || !(body.URL == repoURL || strings.HasPrefix(body.URL, repoURL+"/")) {
+		if err != nil || !(body.URL == repoURL || body.URL == repoURL+"#readme" || strings.HasPrefix(body.URL, repoURL+"/")) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
