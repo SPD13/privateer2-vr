@@ -10,6 +10,7 @@ package main
 //   p2vr.ini           the settings (kept on update; new settings are added to it, p2vr.default.ini has all defaults)
 //   P2VR.VERSION       the installed version
 //   P2VR-README.md, P2VR-SETTINGS.md
+//   P2VR-Launcher.exe  this app, from the release: the "Privateer 2 VR" shortcut opens it to play in VR or flat (and update)
 
 import (
 	"bytes"
@@ -33,10 +34,11 @@ const (
 	versionFile  = "P2VR.VERSION"
 	settingsFile = "p2vr.ini"
 	defaultsFile = "p2vr.default.ini"
+	launcherExe  = "P2VR-Launcher.exe"
 )
 
 // files the mod adds (removed on uninstall; p2vr.ini only when asked)
-var modFiles = []string{vrExe, modDll, "openxr_loader.dll", versionFile, defaultsFile, "P2VR-README.md", "P2VR-SETTINGS.md", "p2vr.log"}
+var modFiles = []string{vrExe, modDll, "openxr_loader.dll", versionFile, defaultsFile, "P2VR-README.md", "P2VR-SETTINGS.md", "p2vr.log", launcherExe, launcherExe + ".old"}
 
 type gameInfo struct {
 	Path        string   `json:"path"`              // the folder of DARK.EXE

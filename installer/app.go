@@ -54,6 +54,12 @@ type jobState struct {
 	Lines      []jobLine `json:"lines"`
 }
 
+type launchState struct {
+	Busy   bool   `json:"busy"`
+	Status string `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
 type appState struct {
 	Title             string      `json:"title"`
 	Version           string      `json:"version"` // of this installer
@@ -63,6 +69,7 @@ type appState struct {
 	UpdateAvailable   bool        `json:"updateAvailable"`
 	InstallerOutdated bool        `json:"installerOutdated"`
 	Job               *jobState   `json:"job"`
+	Launch            launchState `json:"launch"`
 	LogPath           string      `json:"logPath"`
 	Browser           bool        `json:"browser"`
 	Admin             bool        `json:"admin"`
@@ -445,6 +452,12 @@ func (a *app) install(shortcut bool) {
 			}
 		}
 		a.line(job, "note", "P2VR.dll and openxr_loader.dll copied")
+		if launcher := files[strings.ToLower(launcherExe)]; launcher != nil {
+			if err := replaceExe(filepath.Join(dir, launcherExe), launcher); err != nil {
+				return err
+			}
+			a.line(job, "note", "Launcher P2VR-Launcher.exe added (play in VR or flat, updates)")
+		}
 
 		// 3. settings: keep the user's, add the new ones
 		fresh := files["p2vr.ini"]
@@ -474,8 +487,12 @@ func (a *app) install(shortcut bool) {
 
 		// 4. shortcuts
 		if shortcut {
+			target, args := filepath.Join(dir, vrExe), ""
+			if _, err := os.Stat(filepath.Join(dir, launcherExe)); err == nil {
+				target, args = filepath.Join(dir, launcherExe), `--dir "`+dir+`"`
+			}
 			for _, lnk := range shortcutPaths() {
-				if err := createShortcut(lnk, filepath.Join(dir, vrExe), dir); err != nil {
+				if err := createShortcut(lnk, target, args, dir); err != nil {
 					a.line(job, "note", "%v", err)
 				}
 			}
@@ -558,7 +575,12 @@ func (a *app) uninstall(withSettings bool) {
 			names = append(names, settingsFile)
 		}
 		for _, n := range names {
-			if err := os.Remove(filepath.Join(dir, n)); err != nil && !os.IsNotExist(err) {
+			p := filepath.Join(dir, n)
+			if strings.EqualFold(p, thisExe()) { // uninstalling from the launcher: removed once it quits
+				removeSelfLater(p)
+				continue
+			}
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 				return writeErr(err)
 			}
 		}
@@ -574,6 +596,72 @@ func (a *app) uninstall(withSettings bool) {
 		return nil
 	}()
 	a.endJob(job, err)
+}
+
+// ---- launching the game
+
+func (a *app) play(vr, closeAfter bool) {
+	a.mu.Lock()
+	g, busy := a.state.Game, a.state.Launch.Busy || a.busy
+	if !busy {
+		a.state.Launch = launchState{Busy: true}
+	}
+	a.mu.Unlock()
+	if busy {
+		return
+	}
+	set := func(status string) {
+		logf("launch: %s", status)
+		a.update(func(s *appState) { s.Launch.Status = status })
+	}
+	err := func() error {
+		if !g.Valid {
+			return errors.New("Choose the game folder first.")
+		}
+		if processRunning(gameExe, vrExe) {
+			return errors.New("Privateer 2 is already running.")
+		}
+		if vr {
+			if !g.Installed || g.NeedsRepair != "" {
+				return errors.New("Install the VR mod first.")
+			}
+			if !steamVRRunning() {
+				set("Starting SteamVR…")
+				startSteamVR()
+				deadline := time.Now().Add(60 * time.Second)
+				for !steamVRRunning() && time.Now().Before(deadline) {
+					time.Sleep(500 * time.Millisecond)
+				}
+				if !steamVRRunning() {
+					return errors.New("SteamVR did not start. Start it from Steam (with the headset connected), then press Play in VR again.")
+				}
+				set("Waiting for SteamVR to be ready…")
+				time.Sleep(6 * time.Second)
+			}
+		}
+		set("Starting the game…")
+		if err := startGame(g.Path, vr); err != nil {
+			return errors.New("The game could not be started: " + err.Error())
+		}
+		return nil
+	}()
+	if err != nil {
+		a.update(func(s *appState) { s.Launch = launchState{Error: err.Error()} })
+		logf("launch failed: %v", err)
+		return
+	}
+	mode := "flat"
+	if vr {
+		mode = "in VR"
+	}
+	a.update(func(s *appState) { s.Launch = launchState{Busy: true, Status: "Privateer 2 started " + mode + "."} })
+	if closeAfter {
+		time.Sleep(2 * time.Second)
+		os.Exit(0)
+	}
+	time.Sleep(4 * time.Second)
+	a.update(func(s *appState) { s.Launch = launchState{} })
+	a.refreshGame()
 }
 
 // ---- the page's API
@@ -593,6 +681,8 @@ func (a *app) routes(mux *http.ServeMux) {
 		Shortcut bool   `json:"shortcut"`
 		Settings bool   `json:"settings"`
 		URL      string `json:"url"`
+		Mode     string `json:"mode"`
+		Close    bool   `json:"close"`
 	}
 	decode := func(r *http.Request) (requestBody, error) {
 		var b requestBody
@@ -650,13 +740,8 @@ func (a *app) routes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handle("/api/play", "POST", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		dir := a.state.Game.Path
-		a.mu.Unlock()
-		if err := startGame(dir); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		body, _ := decode(r)
+		go a.play(body.Mode == "vr", body.Close)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handle("/api/folder", "POST", func(w http.ResponseWriter, r *http.Request) {

@@ -1,5 +1,6 @@
 # Packs the mod for a release: build\release\privateer2-vr-<version>.zip (what the installer downloads) and
-# build\release\P2VR-Installer.exe. Build first: src\build.bat (with P2VR_VERSION set) and installer\build.ps1.
+# build\release\P2VR-Installer.exe. Build first: src\build.bat (with P2VR_VERSION set) and installer\build.ps1. The zip also
+# holds the installer as P2VR-Launcher.exe, which the install puts in the game folder for the shortcut.
 #   .\scripts\package.ps1 -Version 0.1.0
 param([Parameter(Mandatory)][string]$Version)
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,7 @@ Copy-Item (Join-Path $build "openxr_loader.dll") $stage
 Copy-Item (Join-Path $root "dist\p2vr.ini") $stage
 Copy-Item (Join-Path $root "README.md") $stage
 Copy-Item (Join-Path $root "SETTINGS.md") $stage
+Copy-Item (Join-Path $build "P2VR-Installer.exe") (Join-Path $stage "P2VR-Launcher.exe")   # the launcher the shortcut opens
 Set-Content (Join-Path $stage "VERSION") $Version -NoNewline
 @"
 Privateer 2 VR $Version

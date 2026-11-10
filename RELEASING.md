@@ -13,7 +13,8 @@ for fixes only.
    ```
 3. The **release** workflow (`.github/workflows/release.yml`) builds `P2VR.dll` (x86, MSVC) with the version compiled in,
    builds the installer, and publishes the GitHub release **Privateer 2 VR 0.1.0** with:
-   - `privateer2-vr-0.1.0.zip`: `P2VR.dll`, `openxr_loader.dll`, `p2vr.ini` (defaults), `README.md`, `SETTINGS.md`, `VERSION`
+   - `privateer2-vr-0.1.0.zip`: `P2VR.dll`, `openxr_loader.dll`, `p2vr.ini` (defaults), `README.md`, `SETTINGS.md`, `VERSION`,
+     and `P2VR-Launcher.exe` (the same app as the installer, placed in the game folder for the shortcut)
    - `P2VR-Installer.exe`: the one-click installer
 
    The release notes list the commits since the previous tag; edit them on GitHub if needed.

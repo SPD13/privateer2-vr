@@ -24,6 +24,7 @@ var (
 	procSHGetPathFromIDList = shell32.NewProc("SHGetPathFromIDListW")
 	procFindWindowW         = user32.NewProc("FindWindowW")
 	procSendMessageW        = user32.NewProc("SendMessageW")
+	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
 	procCoInitializeEx      = ole32.NewProc("CoInitializeEx")
 	procCoTaskMemFree       = ole32.NewProc("CoTaskMemFree")
 )
@@ -40,7 +41,7 @@ func openWindow(url string) bool {
 		WindowOptions: webview2.WindowOptions{
 			Title:  appTitle,
 			Width:  780,
-			Height: 860,
+			Height: windowHeight(1240),
 			IconId: 1, // the application icon (rsrc_windows_amd64.syso, see build.ps1)
 			Center: true,
 		},
@@ -52,6 +53,15 @@ func openWindow(url string) bool {
 	w.Navigate(url)
 	w.Run()
 	return true
+}
+
+// windowHeight: the wanted height, but never taller than the screen's work area (above the taskbar)
+func windowHeight(want uint) uint {
+	h, _, _ := procGetSystemMetrics.Call(17) // SM_CYFULLSCREEN: work area height without the caption
+	if h > 100 && uint(h)+30 < want {
+		return uint(h) + 30
+	}
+	return want
 }
 
 func showError(message string) {
@@ -140,10 +150,10 @@ func hidden(cmd *exec.Cmd) *exec.Cmd {
 
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
-// createShortcut: a .lnk to DARKVR.EXE (through Windows' own shortcut object, from PowerShell)
-func createShortcut(lnk, target, workDir string) error {
+// createShortcut: a .lnk (through Windows' own shortcut object, from PowerShell)
+func createShortcut(lnk, target, args, workDir string) error {
 	script := "$s = (New-Object -ComObject WScript.Shell).CreateShortcut(" + psQuote(lnk) + "); " +
-		"$s.TargetPath = " + psQuote(target) + "; $s.WorkingDirectory = " + psQuote(workDir) + "; " +
+		"$s.TargetPath = " + psQuote(target) + "; $s.Arguments = " + psQuote(args) + "; $s.WorkingDirectory = " + psQuote(workDir) + "; " +
 		"$s.IconLocation = " + psQuote(target+",0") + "; $s.Description = 'Privateer 2: The Darkening in VR'; $s.Save()"
 	out, err := hidden(exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)).CombinedOutput()
 	if err != nil {
@@ -168,10 +178,50 @@ func relaunchAsAdmin(gameDir string) error {
 
 func isAdmin() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
-func startGame(dir string) error {
-	cmd := exec.Command(filepath.Join(dir, vrExe))
+// startGame: DARKVR.EXE (VR) or the game's own DARK.EXE (flat), in the game folder
+func startGame(dir string, vr bool) error {
+	exe := gameExe
+	if vr {
+		exe = vrExe
+	}
+	cmd := exec.Command(filepath.Join(dir, exe))
 	cmd.Dir = dir
 	return cmd.Start()
+}
+
+// startSteamVR: through Steam (SteamVR's app id 250820)
+func startSteamVR() { openBrowser("steam://rungameid/250820") }
+
+func steamVRRunning() bool { return processRunning("vrserver.exe", "vrmonitor.exe") }
+
+// thisExe: the running installer / launcher
+func thisExe() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return exe
+}
+
+// replaceExe writes an .exe that may be the running launcher: a running .exe cannot be overwritten, but it can be renamed
+// (to <name>.old, removed at the next start)
+func replaceExe(path string, data []byte) error {
+	if _, err := os.Stat(path); err == nil {
+		os.Remove(path + ".old")
+		if err := os.Rename(path, path+".old"); err != nil {
+			return writeErr(err)
+		}
+	}
+	if err := writeFile(path, data); err != nil {
+		os.Rename(path+".old", path)
+		return err
+	}
+	return nil
+}
+
+// removeSelfLater: delete the running launcher once it has quit (uninstall from the launcher itself)
+func removeSelfLater(path string) {
+	hidden(exec.Command("cmd", "/c", `ping -n 4 127.0.0.1 >nul & del /f /q "`+path+`"`)).Start()
 }
 
 func openFolder(dir string) {

@@ -1,4 +1,5 @@
-// Privateer 2 VR installer: a one-click installer for the Privateer 2: The Darkening VR mod. It finds the game (Steam libraries,
+// Privateer 2 VR installer and launcher: a one-click installer for the Privateer 2: The Darkening VR mod, which also starts the
+// game in VR (SteamVR started first when needed) or flat. Installed into the game folder as P2VR-Launcher.exe for the shortcut. It finds the game (Steam libraries,
 // GOG, or a folder the user chooses), shows whether the mod is installed and which version, reads the latest release on GitHub,
 // and installs, updates, repairs or uninstalls the mod. It only adds files next to the game's DARK.EXE (see game.go).
 //
@@ -24,11 +25,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
 const (
-	appTitle     = "Privateer 2 VR - Installer"
+	appTitle     = "Privateer 2 VR"
 	shortcutName = "Privateer 2 VR"
 	repoURL      = "https://github.com/SPD13/privateer2-vr"
 	releaseAPI   = "https://api.github.com/repos/SPD13/privateer2-vr/releases/latest"
@@ -46,7 +48,16 @@ func main() {
 	flag.Parse()
 
 	openLog()
-	logf("%s %s on %s/%s", appTitle, version, runtime.GOOS, runtime.GOARCH)
+	logf("%s %s on %s/%s (%s)", appTitle, version, runtime.GOOS, runtime.GOARCH, thisExe())
+	// the launcher copy in the game folder: that folder, and the copy left by a self-update removed
+	if exe := thisExe(); exe != "" {
+		os.Remove(exe + ".old")
+		if *dir == "" && strings.EqualFold(filepath.Base(exe), launcherExe) {
+			if d, ok := normalizeGameDir(filepath.Dir(exe)); ok {
+				*dir = d
+			}
+		}
+	}
 
 	tokenBytes := make([]byte, 16)
 	rand.Read(tokenBytes)
