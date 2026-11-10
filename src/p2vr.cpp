@@ -1278,6 +1278,22 @@ static void RenderVrCore() {
         ownShip = *(uint8_t**)(g_game + GAME_SHIPS + *(int*)(g_game + GAME_SHIPIDX) * SHIP_STRIDE);
         if (ownShip && ownShip[0x12] == 1) ownShip[0x12] = 0; else ownShip = nullptr;   // type 0 = not drawn
     }
+    // the own ship's engine / afterburner flames are not its children (as on other ships) but a separate top-level actor
+    // at the ship's position, with the flame models as children: hidden with the ship (eyes sit behind the ship)
+    static uint8_t* hiddenParts[32]; int nHiddenParts = 0;
+    if (ownShip) {
+        const float* sm = (const float*)(ownShip + ACTOR_T_MAT);
+        uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+        for (uint8_t* a = wfg ? *(uint8_t**)(wfg + 8) : nullptr; a; a = *(uint8_t**)a) {
+            if (a == ownShip) continue;
+            const float* m = (const float*)(a + ACTOR_T_MAT);
+            float dx = m[9] - sm[9], dy = m[10] - sm[10], dz = m[11] - sm[11];
+            if (dx * dx + dy * dy + dz * dz > 0.25f) continue;          // not at the ship's origin
+            if (a[0x12] == 1 && nHiddenParts < 32) { a[0x12] = 0; hiddenParts[nHiddenParts++] = a; }
+            for (uint8_t* k = *(uint8_t**)(a + 8); k && nHiddenParts < 32; k = *(uint8_t**)k)
+                if (k[0x12] == 1) { k[0x12] = 0; hiddenParts[nHiddenParts++] = k; }
+        }
+    }
     for (int e = 0; e < 2; e++) {
         float h[9]; QuatRows(v[e].quat, h);
         // background camera: head rotation on top of the game's own orientation, no translation
@@ -1314,6 +1330,7 @@ static void RenderVrCore() {
     g_inEye2 = false;
     UpdateMarkerPoses();
     if (ownShip) ownShip[0x12] = 1;
+    for (int i = 0; i < nHiddenParts; i++) hiddenParts[i][0x12] = 1;
     RestoreShots();
     RestoreCam(s0); RestoreCam(s1);
     RestoreBlend();
