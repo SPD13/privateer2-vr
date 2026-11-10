@@ -1,0 +1,89 @@
+# Release: pushing a tag vX.Y.Z builds the mod (P2VR.dll, x86) and the installer, and publishes a GitHub release with
+#   privateer2-vr-X.Y.Z.zip   the mod, which the installer downloads (from the latest release)
+#   P2VR-Installer.exe        the one-click installer
+# See RELEASING.md. "Run workflow" (manual) builds the same files as an artifact without publishing anything.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for a test build (X.Y.Z, nothing is published)'
+        default: '0.0.0'
+
+permissions:
+  contents: write
+
+env:
+  OPENXR_VERSION: 1.1.65
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the release notes
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '${{ inputs.version }}' }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "bad version '$v': tags are vX.Y.Z" }
+          "VERSION=$v" | Out-File $env:GITHUB_ENV -Append
+          Write-Host "version $v"
+
+      - name: OpenXR SDK
+        shell: pwsh
+        run: |
+          $zip = "openxr_loader_windows-$env:OPENXR_VERSION.zip"
+          Invoke-WebRequest "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-$env:OPENXR_VERSION/$zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath ref\openxr-dl
+          $sdk = (Get-ChildItem ref\openxr-dl -Recurse -Directory -Filter Win32 | Select-Object -First 1).Parent.FullName
+          if (-not (Test-Path "$sdk\include\openxr\openxr.h")) { throw "unexpected OpenXR SDK layout" }
+          "OXR=$sdk" | Out-File $env:GITHUB_ENV -Append
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build P2VR.dll
+        shell: cmd
+        env:
+          P2VR_VERSION: ${{ env.VERSION }}
+        run: src\build.bat
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: installer/go.sum
+
+      - name: Build the installer
+        shell: pwsh
+        run: .\installer\build.ps1 -Version $env:VERSION
+
+      - name: Package
+        shell: pwsh
+        run: .\scripts\package.ps1 -Version $env:VERSION
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: privateer2-vr-${{ env.VERSION }}
+          path: build/release/*
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "notes.md"
+          $prev = git describe --tags --abbrev=0 "$env:GITHUB_REF_NAME^" 2>$null
+          "## Install`n`nDownload **P2VR-Installer.exe** and run it: it finds Privateer 2: The Darkening (30th Anniversary Edition), installs or updates the VR mod, and adds a *Privateer 2 VR* shortcut. Start SteamVR first, then the shortcut.`n" | Out-File $notes -Encoding utf8
+          if ($prev) {
+            "## Changes since $prev`n" | Out-File $notes -Append -Encoding utf8
+            git log --pretty=format:"- %s" "$prev..$env:GITHUB_REF_NAME" | Out-File $notes -Append -Encoding utf8
+          }
+          gh release create $env:GITHUB_REF_NAME build/release/* --title "Privateer 2 VR $env:VERSION" --notes-file $notes

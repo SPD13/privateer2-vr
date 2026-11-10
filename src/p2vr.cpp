@@ -19,6 +19,9 @@
 #include <vector>
 #include <unordered_map>
 #include "vr.h"
+#ifndef P2VR_VERSION
+#define P2VR_VERSION "dev"   // set by build.bat (release workflow: the tag without the v)
+#endif
 void Capture_Install(LogFn log);
 void Macro_Start(const char* dir, bool autoplay, LogFn log);
 void Smooth_Install(LogFn log); void Smooth_SetGameThread(); void Smooth_Report(double seconds); void Smooth_SetIdleCallback(void (*cb)());
@@ -2037,7 +2040,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         GetPrivateProfileStringA("VR", "DUST_SCALE", "1.0", b, 32, p); g_dustScale = (float)atof(b);
         GetPrivateProfileStringA("VR", "WORLD_SCALE", "10", b, 32, p); g_worldScale = (float)atof(b);
         QueryPerformanceFrequency(&g_qpf);
-        Log("p2vr loaded: mode=%d ipd=%.3f sweep=%.1f fovscale=%.2f eye=%dx%d", g_mode, g_ipd, g_sweepDeg, g_fovScale, g_eyeW, g_eyeH);
+        Log("p2vr %s loaded: mode=%d ipd=%.3f sweep=%.1f fovscale=%.2f eye=%dx%d", P2VR_VERSION, g_mode, g_ipd, g_sweepDeg, g_fovScale, g_eyeW, g_eyeH);
         InstallHooks();
         if (GetPrivateProfileIntA("VR", "EYE_MAX", 2048, p) > 2048) Log("BRender 2048 size check lifted: %d", LiftSizeLimit());
         if (g_vrEnable) { Capture_Install(Log); Vr_Start(p, Log); Vr_SetObserverBack(g_observerBack); }

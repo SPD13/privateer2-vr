@@ -26,11 +26,25 @@ These steps assume Windows, Visual Studio 2026 (x86 toolset) and Python 3.
 1. Download the OpenXR SDK loader release `openxr_loader_windows-1.1.x`. Extract it to `ref/openxr/` so that `ref/openxr/include` and `ref/openxr/Win32` exist.
 2. Run `src/build.bat`. The output goes to `build/p2vr.dll` and `build/openxr_loader.dll`.
 
-## Install (into a copy of the game, never the Steam folder itself)
+## Install
+1. Download **[P2VR-Installer.exe](https://github.com/SPD13/privateer2-vr/releases/latest/download/P2VR-Installer.exe)** and run it.
+   - Windows SmartScreen may warn on first launch, because the installer is not signed. Click *More info* > *Run anyway*.
+2. The installer finds the game in your Steam libraries (or GOG), or you choose its folder.
+   - It shows whether the mod is installed and its version, and checks GitHub for the latest release.
+3. Press **Install** (or **Update**).
+   - It adds `DARKVR.EXE` (made from your own `DARK.EXE`), `P2VR.dll`, `openxr_loader.dll` and `p2vr.ini` next to the game, and a *Privateer 2 VR* shortcut. No file of the game is changed.
+   - On update your `p2vr.ini` is kept; settings added in the new version are appended with their defaults.
+4. Start SteamVR, then the **Privateer 2 VR** shortcut. Starting the game from Steam still plays it flat.
+
+Run the installer again at any time to update, repair (e.g. after Steam updated the game) or uninstall.
+
+### Manual install (developers)
 1. Copy the contents of `<Steam>/steamapps/common/Privateer 2 The Darkening/Windows` to a working folder (e.g. `game/`). You can link the large FMV folders with directory junctions instead of copying them.
 2. Run `python scripts/make_darkvr.py game/DARK.EXE game/DARKVR.EXE`.
 3. Copy `build/p2vr.dll`, `build/openxr_loader.dll` and `dist/p2vr.ini` into the folder.
 4. Start SteamVR, then run `DARKVR.EXE`.
+
+Releases: see [RELEASING.md](RELEASING.md).
 
 ## VR controllers (SteamVR; every action is remappable in SteamVR > Controller bindings)
 | Control | In flight | In menus / bases / films |
