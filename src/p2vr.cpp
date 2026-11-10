@@ -607,9 +607,57 @@ static void UpdateHudRemap() {
     }
     g_hudRemapValid = true;
 }
-extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
-    g_frameDone = true;
-    if (g_lastCol && Vr_Active()) {   // which HUD panels hold something this frame (closed windows: no compositor layer)
+// Text or graphics the game draws across a panel edge (e.g. "OBSERVER VIEW" on the VELOCITY panel's top edge) would be cut
+// between the angled panel and the flat HUD. Each pixel group crossing an edge (pixels joined across small gaps, so a
+// line of text is one group) is added whole to that panel for this frame. Groups reaching into another panel, or too
+// big to be text, are left alone.
+static void GrowPanelsAroundText(br_pixelmap* gc, int (*rects)[4], int n) {
+    static uint16_t stamp[480][640]; static uint16_t stampId; static int qx[8192], qy[8192];
+    auto px = [&](int x, int y) -> uint8_t { return (gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x)[x]; };
+    auto inRect = [](const int* r, int x, int y) { return x >= r[0] && x < r[2] && y >= r[1] && y < r[3]; };
+    int out[12][4];
+    for (int k = 0; k < n; k++) {
+        const int* r = rects[k]; for (int i = 0; i < 4; i++) out[k][i] = r[i];
+        // seed pairs straddling the edges: a drawn pixel inside next to a drawn pixel outside
+        int seeds[256][2]; int ns = 0;
+        auto seed = [&](int ix, int iy, int ox2, int oy2) {
+            if (ns < 256 && ox2 >= 0 && ox2 < 640 && oy2 >= 0 && oy2 < 480 && ix >= 0 && ix < 640 && iy >= 0 && iy < 480 && px(ix, iy) && px(ox2, oy2)) { seeds[ns][0] = ix; seeds[ns][1] = iy; ns++; } };
+        for (int x = r[0]; x < r[2]; x++) { seed(x, r[1], x, r[1] - 1); seed(x, r[3] - 1, x, r[3]); }
+        for (int y = r[1]; y < r[3]; y++) { seed(r[0], y, r[0] - 1, y); seed(r[2] - 1, y, r[2], y); }
+        if (stampId > 0xF000) { memset(stamp, 0, sizeof stamp); stampId = 0; }
+        uint16_t base = (uint16_t)(stampId + 1);                       // groups of this panel: ids >= base
+        for (int s = 0; s < ns; s++) {
+            if (stamp[seeds[s][1]][seeds[s][0]] >= base) continue;     // already part of a group of this panel
+            ++stampId;
+            int head = 0, tail = 0, bx0 = 640, by0 = 480, bx1 = -1, by1 = -1; bool shared = false;
+            qx[tail] = seeds[s][0]; qy[tail++] = seeds[s][1]; stamp[seeds[s][1]][seeds[s][0]] = stampId;
+            while (head < tail && tail < 8000) {
+                int x = qx[head], y = qy[head++];
+                if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
+                if (!inRect(r, x, y)) for (int j = 0; j < n; j++) if (j != k && inRect(rects[j], x, y)) shared = true;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -5; dx <= 5; dx++) {   // letters and word gaps of a line
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || nx >= 640 || ny < 0 || ny >= 480 || stamp[ny][nx] == stampId || !px(nx, ny)) continue;
+                    stamp[ny][nx] = stampId; if (tail < 8000) { qx[tail] = nx; qy[tail++] = ny; }
+                }
+            }
+            if (shared || tail >= 8000 || bx1 - bx0 > 320 || by1 - by0 > 120) continue;
+            if (bx0 < out[k][0]) out[k][0] = bx0; if (by0 < out[k][1]) out[k][1] = by0;
+            if (bx1 + 1 > out[k][2]) out[k][2] = bx1 + 1; if (by1 + 1 > out[k][3]) out[k][3] = by1 + 1;
+        }
+        static int lastLogged[12][4];
+        if (memcmp(out[k], lastLogged[k], sizeof out[k]) && (out[k][0] != r[0] || out[k][1] != r[1] || out[k][2] != r[2] || out[k][3] != r[3])) {
+            memcpy(lastLogged[k], out[k], sizeof out[k]);
+            Log("[panels] panel %d grown to (%d,%d)-(%d,%d) around text on its edge", k, out[k][0], out[k][1], out[k][2], out[k][3]);
+        }
+    }
+    Vr_SetPanelRects(out, n);
+}
+// After the flight HUD (game thread, the frame buffer still holds it): which HUD panels hold something (closed windows: no
+// compositor layer), and panels grown around text crossing their edges. (Not at Present: that runs on p2den's thread,
+// when the game's buffer may already be cleared for the next frame.)
+static void PanelLayout() {
+    if (g_lastCol && Vr_Active()) {
         br_pixelmap* gc = (br_pixelmap*)g_lastCol;
         static int rects[12][4]; int n = Vr_GetPanelRects(rects, 12);
         if (n && gc->width == 640 && gc->height == 480) {
@@ -623,8 +671,13 @@ extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle 
                 if (any) mask |= 1u << k;
             }
             Vr_SetPanelMask(mask);
+            GrowPanelsAroundText(gc, rects, n);
         }
     }
+}
+extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
+    g_frameDone = true;
+    PanelLayout();
     if (g_retInEyes && g_lastCol) {   // crosshair source for the next frames' eye images
         br_pixelmap* gc = (br_pixelmap*)g_lastCol;
         if (gc->width == 640 && gc->height == 480) {

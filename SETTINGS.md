@@ -89,7 +89,7 @@ Default panels (names are fixed). A panel only takes a compositor layer while so
 
 | Panel | HUD content | Default value |
 |---|---|---|
-| `PANEL_VELOCITY` | Velocity readout and bars (top centre) | `236,4,406,58, 0,24, 0.36` |
+| `PANEL_VELOCITY` | Velocity readout and bars (top centre), and the camera-view labels above them ("OBSERVER VIEW"…) | `236,0,406,58, 0,24, 0.36` |
 | `PANEL_COMMS` | Comms window (top left) | `0,0,124,140, -34,22, 0.24` |
 | `PANEL_TARGET` | Target VDU (bottom left) | `2,342,120,478, -44,-22, 0.28` |
 | `PANEL_TARGET_SHIELDS` | Target's shield/armour ring (left of the radar) | `138,382,254,476, -22,-26, 0.24` |

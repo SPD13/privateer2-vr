@@ -71,6 +71,20 @@ static float s_keyThresh = 0.03f;    // gamma brightness below which HUD pixels 
 
 // ---------------------------------------------------------------- shared state
 static CRITICAL_SECTION s_cs;
+// Panel rectangles of the current game frame: the configured ones, grown to take in whole any text / graphic the game drew
+// across a panel edge (Vr_SetPanelRects, from p2vr's PostHud), so nothing is cut between a panel and the flat HUD.
+static int s_dynRect[MAX_PANELS][4]; static bool s_dynValid;
+void Vr_SetPanelRects(const int (*r)[4], int n) {
+    EnterCriticalSection(&s_cs);
+    for (int k = 0; k < n && k < MAX_PANELS; k++) for (int i = 0; i < 4; i++) s_dynRect[k][i] = r[k][i];
+    s_dynValid = n == s_nPanels;
+    LeaveCriticalSection(&s_cs);
+}
+static void PanelRects(float (*out)[4]) {   // the rectangles to use now (HUD pixels, 640x480)
+    EnterCriticalSection(&s_cs);
+    for (int k = 0; k < s_nPanels; k++) for (int i = 0; i < 4; i++) out[k][i] = s_dynValid ? (float)s_dynRect[k][i] : s_panels[k].r[i];
+    LeaveCriticalSection(&s_cs);
+}
 static volatile LONG s_active;
 static VrView   s_views[2];
 static bool     s_viewsValid;
@@ -88,6 +102,7 @@ struct EyeSet { std::vector<uint8_t> px[2]; VrView views[2]; uint8_t pal[1024]; 
 static EyeSet   s_sets[3];
 static int      s_back = 0, s_ready = -1, s_inUse = -1;
 static DWORD    s_lastEyeTick;
+static uint32_t s_eyeCount, s_eyeCountAtScreen; static LARGE_INTEGER s_lastEyeQpc; static bool s_screenFlight;   // see Vr_SetScreenSource
 
 // HUD markers (8-bit) from the game thread
 static std::vector<uint8_t> s_mk; static int s_mkW, s_mkH; static uint8_t s_mkPal[1024]; static bool s_mkNew;
@@ -153,7 +168,7 @@ void Vr_SubmitEyes(const VrView used[2], const uint8_t pal[1024]) {
     s.views[0] = used[0]; s.views[1] = used[1]; memcpy(s.pal, pal, 1024);
     s_ready = s_back;
     for (int i = 0; i < 3; i++) if (i != s_ready && i != s_inUse) { s_back = i; break; }
-    s_lastEyeTick = GetTickCount();
+    s_lastEyeTick = GetTickCount(); s_eyeCount++; QueryPerformanceCounter(&s_lastEyeQpc);
     LeaveCriticalSection(&s_cs);
 }
 void Vr_SetObserverBack(float m) { s_observerBack = m; }
@@ -183,6 +198,13 @@ uint32_t Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t pal[10
 void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     EnterCriticalSection(&s_cs);
     s_screenHandle = h; s_screenW = w; s_screenH = hgt; s_screenFrame = frame;
+    // this screen frame belongs to flight if the eyes were rendered for it: since the previous screen frame, or just now.
+    // The first flat frame (nav map, options...) has none, so the headset switches to the flat screen on that very
+    // frame instead of up to 300 ms later (the frozen space view with the flat image laid over it as a HUD).
+    LARGE_INTEGER now, f; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
+    double ms = s_lastEyeQpc.QuadPart ? (now.QuadPart - s_lastEyeQpc.QuadPart) * 1000.0 / f.QuadPart : 1e9;
+    s_screenFlight = s_eyeCount != s_eyeCountAtScreen || ms < 20.0;
+    s_eyeCountAtScreen = s_eyeCount;
     LeaveCriticalSection(&s_cs);
 }
 
@@ -760,8 +782,9 @@ static void DrawHud(ID3D11ShaderResourceView* src, bool flight) {
     ctx->PSSetShaderResources(0, 3, srvs); ctx->PSSetSamplers(0, 1, &linSamp); ctx->PSSetConstantBuffers(0, 1, &cbuf);
     float pcb[52] = {};   // panel rectangles (uv) cut out of the main HUD in flight
     bool panels = flight && s_panelsOn;
-    if (panels) { for (int k = 0; k < s_nPanels; k++) { pcb[k*4] = s_panels[k].r[0] / 640.f; pcb[k*4+1] = s_panels[k].r[1] / 480.f;
-                                                          pcb[k*4+2] = s_panels[k].r[2] / 640.f; pcb[k*4+3] = s_panels[k].r[3] / 480.f; }
+    float pr[MAX_PANELS][4]; if (panels) PanelRects(pr);
+    if (panels) { for (int k = 0; k < s_nPanels; k++) { pcb[k*4] = pr[k][0] / 640.f; pcb[k*4+1] = pr[k][1] / 480.f;
+                                                          pcb[k*4+2] = pr[k][2] / 640.f; pcb[k*4+3] = pr[k][3] / 480.f; }
                   pcb[48] = (float)s_nPanels; }
     ctx->UpdateSubresource(cbufPanels, 0, nullptr, pcb, 0, 0); ctx->PSSetConstantBuffers(2, 1, &cbufPanels);
     float hw = s_retPx / (2.0f * HUD_PX_W), hh = s_retPx / (2.0f * HUD_PX_H);   // crosshair region half-size in HUD uv
@@ -1004,7 +1027,10 @@ static void FrameLoop() {
         }
         InterlockedExchange(&s_active, targetDone ? 1 : 0);
 
-        bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300;
+        EnterCriticalSection(&s_cs); bool screenFlight = s_screenFlight; LeaveCriticalSection(&s_cs);
+        bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300 && screenFlight;
+        {   static bool lastF; static DWORD lastSwitch; if (flight != lastF) { lastF = flight;
+                Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); (void)lastSwitch; } }
         if (s_retDist > 0) {
             float want = s_retWanted > 0 ? s_retWanted : s_retDist;
             if (want > s_retDist) want = s_retDist; if (want < s_retMin) want = s_retMin;
@@ -1095,17 +1121,25 @@ static void FrameLoop() {
                 if (flight && s_panelsOn && havePanels) {
                     const float px = (float)HUD_PX_W / 640.f;
                     uint32_t pmask = (uint32_t)s_panelMask;
+                    float pr[MAX_PANELS][4]; PanelRects(pr);
                     for (int k = 0; k < s_nPanels; k++) {
                         if (!((pmask >> k) & 1)) continue;                     // nothing drawn there: no layer
                         const HudPanel& hp = s_panels[k]; XrCompositionLayerQuad& q = pq[k]; q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
-                        int x0 = (int)(hp.r[0] * px), y0 = (int)(hp.r[1] * px), x1 = (int)(hp.r[2] * px), y1 = (int)(hp.r[3] * px);
+                        const float* r = pr[k];                                 // this frame's rectangle (may be grown)
+                        int x0 = (int)(r[0] * px), y0 = (int)(r[1] * px), x1 = (int)(r[2] * px), y1 = (int)(r[3] * px);
                         q.space = localSpace; q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                         q.subImage.swapchain = panelSc.sc; q.subImage.imageRect = {{x0, y0}, {x1 - x0, y1 - y0}};
-                        q.size = {hp.width, hp.width * (hp.r[3] - hp.r[1]) / (hp.r[2] - hp.r[0])};
+                        float mpp = hp.width / (hp.r[2] - hp.r[0]);             // metres per HUD pixel (configured scale)
+                        q.size = {mpp * (r[2] - r[0]), mpp * (r[3] - r[1])};
                         // yaw about Y (+ = face turned right), then tilt about X (+ = face turned up)
                         float a = hp.yaw * 0.0087266f, b = -hp.pitch * 0.0087266f;
                         float sy = sinf(a), cy = cosf(a), sx = sinf(b), cx = cosf(b);
-                        q.pose = {{cy * sx, sy * cx, -sy * sx, cy * cx}, {hp.pos[0], hp.pos[1], hp.pos[2]}};
+                        float qq[4] = {cy * sx, sy * cx, -sy * sx, cy * cx};
+                        // a grown rectangle moves the quad's centre within the panel's own plane
+                        float ox = mpp * ((r[0] + r[2]) - (hp.r[0] + hp.r[2])) * 0.5f, oy = -mpp * ((r[1] + r[3]) - (hp.r[1] + hp.r[3])) * 0.5f;
+                        float tx = 2 * (qq[1] * 0 - qq[2] * oy), ty = 2 * (qq[2] * ox - qq[0] * 0), tz = 2 * (qq[0] * oy - qq[1] * ox);   // t = 2 q.xyz x v
+                        float wx = ox + qq[3] * tx + (qq[1] * tz - qq[2] * ty), wy = oy + qq[3] * ty + (qq[2] * tx - qq[0] * tz), wz = qq[3] * tz + (qq[0] * ty - qq[1] * tx);
+                        q.pose = {{qq[0], qq[1], qq[2], qq[3]}, {hp.pos[0] + wx, hp.pos[1] + wy, hp.pos[2] + wz}};
                         q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
                         layers.push_back((XrCompositionLayerBaseHeader*)&q);
                     }
@@ -1184,7 +1218,7 @@ void Vr_Start(const char* ini, LogFn log) {
     s_maximize = IniF(ini, "WINDOW_MAXIMIZE", 1.0f) != 0;
     float radius = IniF(ini, "PANEL_RADIUS", 0.8f);
     static const char* kPanelDefaults[][2] = {
-        {"VELOCITY",       "236,4,406,58,     0, 24, 0.36"},
+        {"VELOCITY",       "236,0,406,58,     0, 24, 0.36"},   // from the top: camera-view labels ("OBSERVER VIEW") at y 3..7
         {"COMMS",          "0,0,124,140,    -34, 22, 0.24"},   // windows only: the direction arrows circle the crosshair at ~100 px
         {"TARGET",         "2,342,120,478,  -44,-22, 0.28"},
         {"TARGET_SHIELDS", "138,382,254,476,-22,-26, 0.24"},
