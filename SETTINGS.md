@@ -97,7 +97,8 @@ Default panels (names are fixed). A panel only takes a compositor layer while so
 | `PANEL_SHIELDS` | Your own ship's shield/armour ring (right of the radar) | `388,382,504,476, 22,-26, 0.24` |
 | `PANEL_RIGHT` | Right VDU area (bottom right) | `504,342,640,478, 44,-22, 0.28` |
 | `PANEL_MISSILES` | Top-right window | `516,0,640,124, 34,22, 0.24` |
-| `PANEL_GUNS` | Guns window (right, middle) | `520,124,640,272, 40,0, 0.24` |
+| `PANEL_GUNS` | Guns window (right, middle) | `520,124,640,264, 40,4, 0.24` |
+| `PANEL_MINES` | Mines / decoys window (right, below the guns) | `520,264,640,342, 40,-11, 0.24` |
 
 A malformed value is ignored and reported in `p2vr.log` (`[vr] PANEL_... ignored`). Each panel is one OpenXR composition layer; if the runtime's layer limit (16 on SteamVR) is reached, target markers are dropped before panels.
 

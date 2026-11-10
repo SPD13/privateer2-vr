@@ -1192,7 +1192,8 @@ void Vr_Start(const char* ini, LogFn log) {
         {"SHIELDS",        "388,382,504,476, 22,-26, 0.24"},
         {"RIGHT",          "504,342,640,478, 44,-22, 0.28"},
         {"MISSILES",       "516,0,640,124,   34, 22, 0.24"},   // top right window
-        {"GUNS",           "520,124,640,272, 40,  0, 0.24"}};  // right middle: guns VDW (max 12 panels)
+        {"GUNS",           "520,124,640,264, 40,  4, 0.24"},   // right middle: guns VDW
+        {"MINES",          "520,264,640,342, 40,-11, 0.24"}};  // below it: mines / decoys VDW (max 12 panels)
     s_nPanels = 0;
     for (auto& d : kPanelDefaults) {
         char key[32], b[160]; sprintf_s(key, "PANEL_%s", d[0]);
