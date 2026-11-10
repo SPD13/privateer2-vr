@@ -396,6 +396,9 @@ static HWND GameWnd();
 static Swap msgSc[2]; static bool msgReady[2]; static const int MSG_W = 1280, MSG_H = 200;
 static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt
 void Vr_ShowMessage(int which) { InterlockedExchange(&s_msgShow, which); }
+// cursor offset of the current 2D screen (PAD, nav map): reported while that cursor is drawn, forgotten 1 s after
+static volatile LONG s_curOff, s_curOffTick;
+void Vr_SetCursorOffset(int x, int y) { InterlockedExchange(&s_curOff, (x & 0xffff) | (y << 16)); InterlockedExchange(&s_curOffTick, (LONG)GetTickCount()); }
 static void MakeMessage(int slot, const char* text) {
     Swap& sw = msgSc[slot];
     if (!MakeSwap(sw, MSG_W, MSG_H)) return;
@@ -483,7 +486,11 @@ static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW
             HWND w = GameWnd();
             if (w && GameFront()) {
                 RECT r; GetClientRect(w, &r);
-                POINT pt = {LONG((s_uOff + u * s_uScale) * r.right), LONG(v * r.bottom)};
+                // screens that draw the cursor offset from the mouse (PAD, nav map): move the mouse so the drawn cursor,
+                // which is what the game hit-tests, lands where the beam points
+                float mu = u, mv = v;
+                if (GetTickCount() - (DWORD)s_curOffTick < 1000) { LONG o = s_curOff; mu -= (o & 0xffff) / 640.f; mv -= (o >> 16) / 480.f; }
+                POINT pt = {LONG((s_uOff + mu * s_uScale) * r.right), LONG(mv * r.bottom)};
                 ClientToScreen(w, &pt);
                 static POINT last = {-1, -1};
                 if (pt.x != last.x || pt.y != last.y) {

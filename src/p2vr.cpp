@@ -658,7 +658,10 @@ struct PushadFrame { uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax, ret, y1, c
 // HUD glass, below the panels) with the next marker set (one game frame later).
 static bool g_hudArrowLayer = true;
 static MkLine g_hudArrow[8], g_hudArrowPrev[8]; static int g_nHudArrow, g_nHudArrowPrev;
+static bool g_cursorFix = true;
+static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view);
 extern "C" int __cdecl RecordLine(PushadFrame* f) {
+    if (g_cursorFix) DetectCursorOffset(f->ret, (int)f->edx, (int)f->ebx, (const int*)f->eax);
     if (f->ret == 0x45689e || f->ret == 0x4568e0 || f->ret == 0x456917) {
         if (!g_hudArrowLayer || !Vr_Active()) return 0;
         if (g_nHudArrow < 8) g_hudArrow[g_nHudArrow++] = {(int)f->edx, (int)f->ebx, (int)f->ecx, (int)f->y1, (int)(f->colour & 0xff)};
@@ -1531,15 +1534,65 @@ static void CursorGamePos(int* gx, int* gy) {   // Windows cursor -> game 640x48
     float ox = (r.right - vw) * 0.5f, oy = (r.bottom - vh) * 0.5f;
     *gx = (int)((pt.x - ox) * 640.f / vw); *gy = (int)((pt.y - oy) * 480.f / vh);
 }
-// The blitter draws at view origin (view+4, view+8) + (x, y). The PAD (0x436390) draws its cursor, its shadow and the
-// background restore 80x80 all shifted by its screen's origin (60,23), so the cursor sits right/down of the pointer.
-// CURSOR_FIX moves all three onto the pointer: the cursor here, the restore and shadow offsets by byte patches.
-static bool g_cursorFix = true;
+// Offset screens: the blitter draws at view origin (view+4, view+8) + (x, y). Some screens (the PAD 0x436390, the nav map)
+// draw their mouse cursor at the game's pointer position inside a view whose origin is not (0,0), e.g. the PAD at (60,23):
+// the cursor shows right/down of the mouse, and the game's hit-testing follows the drawn cursor. So the drawing is right and
+// the VR pointer must move the mouse to (beam - view origin). With CURSOR_FIX, the cursor draw is found as the sprite call
+// (per call site: the PAD cursor is animated, its sprite id changes) whose position follows the mouse, and its view origin
+// is handed to the VR pointer (Vr_SetCursorOffset).
+// A sprite call site is the cursor when its position follows the mouse at a constant distance c (0 on the PAD and menus):
+// c the same at two different resting positions. Several such sites (cursor, its shadow at +3): the smallest c wins.
+// The VR pointer offset is then c + the view origin.
+static bool g_cursorLog = false;   // CURSOR_LOG: every second, the draws that moved (to find a screen's cursor)
+static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
+    static DWORD posTick; static int mx = -1, my = -1;
+    DWORD now = GetTickCount();
+    if (now != posTick) { posTick = now; CursorGamePos(&mx, &my); }
+    if (mx < 0 || !view) return;
+    struct Site { uint32_t ret; int x, y; DWORD moved; int dx, dy, stable; bool rest; int px, py, pdx, pdy; bool confirmed; int ox, oy; };
+    static Site sites[128]; static int nSites;
+    Site* s = nullptr;
+    for (int i = 0; i < nSites; i++) if (sites[i].ret == ret) { s = &sites[i]; break; }
+    if (!s) { if (nSites >= 128) return; s = &sites[nSites++]; *s = {}; s->ret = ret; s->x = x; s->y = y; }
+    if (x != s->x || y != s->y) { s->x = x; s->y = y; s->moved = now; }
+    s->ox = view[1]; s->oy = view[2];
+    if (g_cursorLog) {
+        static DWORD lastDiag;
+        if (now - lastDiag > 1000) {
+            lastDiag = now; char line[700]; int o = sprintf_s(line, "[cursor-diag] mouse (%d,%d), moved:", mx, my), shown = 0;
+            for (int i = 0; i < nSites && shown < 8 && o < 600; i++) if (now - sites[i].moved < 1000) {
+                o += sprintf_s(line + o, sizeof line - o, " [%08x at (%d,%d) view (%d,%d)]", sites[i].ret, sites[i].x, sites[i].y, sites[i].ox, sites[i].oy); shown++; }
+            if (shown) Log("%s", line);
+        }
+    }
+    int xy[2] = {x, y};
+    int dx = xy[0] - mx, dy = xy[1] - my;
+    if (abs(dx) > 200 || abs(dy) > 200) { s->stable = 0; return; }
+    if (dx == s->dx && dy == s->dy) s->stable++; else { s->dx = dx; s->dy = dy; s->stable = 0; }
+    if (s->stable < 6 || now - s->moved > 10000) return;          // at rest (the mouse sample may lag while moving)
+    bool exact = abs(dx) <= 2 && abs(dy) <= 2;                      // drawn on the mouse: no confirmation needed
+    if (!exact && !s->confirmed) {
+        if (!s->rest || dx != s->pdx || dy != s->pdy) { s->rest = true; s->px = xy[0]; s->py = xy[1]; s->pdx = dx; s->pdy = dy; return; }
+        if (xy[0] == s->px && xy[1] == s->py) return;              // same resting place: wait for a second one
+        s->confirmed = true;
+    }
+    static DWORD bestTick; static int bestMag = 1 << 30;
+    int mag = abs(dx) + abs(dy);
+    if (now - bestTick < 3000 && mag > bestMag) return;             // a closer follower (the cursor itself) is active
+    bestTick = now; bestMag = mag;
+    int ox = view[1] + (exact ? 0 : dx), oy = view[2] + (exact ? 0 : dy);
+    if (ox < -200 || ox >= 640 || oy < -200 || oy >= 480) return;
+    Vr_SetCursorOffset(ox, oy);
+    static int lastOx = 1 << 30, lastOy;
+    if (ox != lastOx || oy != lastOy) {
+        lastOx = ox; lastOy = oy;
+        Log("[cursor] drawn from %08x, view at (%d,%d), %d,%d from the mouse: VR pointer offset (%d,%d)", ret, view[1], view[2], dx, dy, ox, oy);
+    }
+}
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
+    if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view);   // also the nav map, opened during flight
     if (GetTickCount() - g_lastFlightTick < 500) return;            // only menus / films / PAD
     if (g_cursorId >= 0 && id == g_cursorId && (!g_cursorShapes || shapes == g_cursorShapes)) { xy[0] += g_cursorDx; xy[1] += g_cursorDy; }
-    // PAD cursor (drawn from 0x4364fd into the PAD view, origin 60,23): draw it at the pointer itself
-    if (g_cursorFix && view && xy[-4] == 0x436502) { xy[0] -= view[1]; xy[1] -= view[2]; }
     if (!g_spriteLog) return;
     static int lastX[1024], lastY[1024]; static DWORD lastLog[1024];
     int k = id & 1023;
@@ -1552,7 +1605,42 @@ extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
     }
     lastX[k] = xy[0]; lastY[k] = xy[1];
 }
-static uintptr_t g_spr1Cont = 0x41305a + 6, g_spr2Cont = 0x4144e0 + 6;
+static uintptr_t g_spr1Cont = 0x41305a + 6, g_spr2Cont = 0x4144e0 + 6, g_spr3Cont = 0x413e52 + 6, g_spr4Cont = 0x41368d + 6;
+extern "C" void __cdecl SpriteDetect(int id, void* shapes, int* xy, int* view) { if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view); }
+__declspec(naked) static void HookSprite3() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]
+        lea eax, [esp + 52]
+        push eax
+        push dword ptr [esp + 48]
+        push dword ptr [esp + 56]
+        call SpriteDetect
+        add esp, 16
+        popad
+        push ebp
+        mov ebp, esp
+        add esp, -0x50
+        jmp dword ptr [g_spr3Cont]
+    }
+}
+__declspec(naked) static void HookSprite4() {
+    __asm {
+        pushad
+        push dword ptr [esp + 36]
+        lea eax, [esp + 52]
+        push eax
+        push dword ptr [esp + 48]
+        push dword ptr [esp + 56]
+        call SpriteDetect
+        add esp, 16
+        popad
+        push ebp
+        mov ebp, esp
+        add esp, -0x50
+        jmp dword ptr [g_spr4Cont]
+    }
+}
 __declspec(naked) static void HookSprite1() {
     __asm {
         pushad
@@ -1944,7 +2032,8 @@ static void InstallHooks() {
     Log("hooks: controls joystick=%d roll=%d", g1, g2);
     static const uint8_t sprPro[6] = {0x55, 0x8B, 0xEC, 0x83, 0xC4, 0xB0};   // push ebp; mov ebp,esp; add esp,-0x50
     bool h1 = WriteJmp(0x41305a, (void*)HookSprite1, sprPro, 6), h2 = WriteJmp(0x4144e0, (void*)HookSprite2, sprPro, 6);
-    Log("hooks: sprites %d %d", h1, h2);
+    bool h3 = WriteJmp(0x413e52, (void*)HookSprite3, sprPro, 6), h4 = WriteJmp(0x41368d, (void*)HookSprite4, sprPro, 6);
+    Log("hooks: sprites %d %d %d %d", h1, h2, h3, h4);
     static const uint8_t linePro[7] = {0x56, 0x57, 0x55, 0x8B, 0x74, 0x24, 0x20};   // push esi; push edi; push ebp; mov esi,[esp+0x20]
     Log("hooks: marker lines %d", WriteJmp(0x4661a0, (void*)HookLine, linePro, 7));
     {   int ok = 0;   // space session entry: redirect both call sites through SpaceSessionThunk
@@ -1960,13 +2049,6 @@ static void InstallHooks() {
             VirtualProtect(q, 5, old, &old); FlushInstructionCache(GetCurrentProcess(), q, 5); ok++;
         }
         Log("hooks: space session entry %d/2", ok); }
-    if (g_cursorFix) {   // PAD: background restore at pointer-1 (was +0x3b,+0x16), shadow at pointer+3 in the PAD view (was +3,+3)
-        struct { uintptr_t at; uint8_t was, now; } pp[] = {{0x4363c8, 0x3b, 0xff}, {0x4363da, 0x16, 0xff}, {0x436481, 0x03, 0xec}, {0x436491, 0x03, 0xc7}};
-        bool ok = true;
-        for (auto& q : pp) ok = ok && *(uint8_t*)(q.at - 2) == 0x83 && *(uint8_t*)(q.at - 1) == 0xc0 && *(uint8_t*)q.at == q.was;
-        if (ok) for (auto& q : pp) { DWORD old; VirtualProtect((void*)q.at, 1, PAGE_EXECUTE_READWRITE, &old); *(uint8_t*)q.at = q.now; VirtualProtect((void*)q.at, 1, old, &old); }
-        Log("hooks: PAD cursor fix %d", ok);
-    }
     for (uintptr_t slot : {(uintptr_t)0x570194, (uintptr_t)0x570198}) {   // joyGetNumDevs / joyGetPosEx import slots
         void* fn = *(void**)slot; HMODULE m = nullptr; char name[MAX_PATH] = "?";
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)fn, &m))
@@ -2013,6 +2095,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_ctlEnable = GetPrivateProfileIntA("VR", "VR_CONTROLS", 1, p) != 0;
         g_spriteLog = GetPrivateProfileIntA("VR", "SPRITE_LOG", 0, p) != 0;
         g_cursorFix = GetPrivateProfileIntA("VR", "CURSOR_FIX", 1, p) != 0;
+        g_cursorLog = GetPrivateProfileIntA("VR", "CURSOR_LOG", 0, p) != 0;
         g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
         g_joyPass = GetPrivateProfileIntA("VR", "JOYSTICK_PASSTHROUGH", 1, p) != 0;
         g_spacePrompt = GetPrivateProfileIntA("VR", "SPACE_PROMPT", 1, p) != 0;

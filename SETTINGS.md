@@ -124,7 +124,7 @@ Outside flight, the game screen is shown on a virtual screen. The right controll
 |---|---|---|
 | `SCREEN_DIST` | `2.5` | Distance of the virtual screen. |
 | `SCREEN_WIDTH` | `3.2` | Width of the virtual screen. |
-| `CURSOR_FIX` | `1` | PAD screen: draw the mouse cursor, its shadow and its background erase exactly under the pointer. The original game shifts all three by the PAD screen's origin (60,23). `0` = original behaviour. |
+| `CURSOR_FIX` | `1` | Screens that draw the mouse cursor offset from the mouse position, such as the PAD (by its screen origin, 60,23) and the nav map: the VR pointer moves the mouse so that the drawn cursor lands exactly where the beam points. The drawn cursor is what the game uses for clicks. The offset is detected automatically from where the game draws its cursor. `0` = the mouse goes exactly to the beam point (the cursor then shows offset). |
 
 ## VR controllers
 
@@ -165,8 +165,9 @@ These are for development; leave them at their defaults for play.
 | Setting | Default | Effect |
 |---|---|---|
 | `ACTOR_LOG` | `0` | Log 3D objects appearing near the ship. |
+| `CURSOR_LOG` | `0` | Every second, log the sprite and line draws that moved, with their view origin and the mouse position, to find how a screen draws its cursor (`CURSOR_FIX`). |
 | `SPRITE_LOG` | `0` | Log 2D sprite draws (id, shape table, position, bounds, pointer position) outside flight. Used to find the PAD cursor. |
-| `PAD_CURSOR_ID`, `PAD_CURSOR_DX`, `PAD_CURSOR_DY` | `-1`, `0`, `0` | Manual nudge: move every draw of sprite `PAD_CURSOR_ID` by (DX, DY) game pixels outside flight. `-1` = off. Superseded by `CURSOR_FIX`. |
+| `PAD_CURSOR_ID`, `PAD_CURSOR_DX`, `PAD_CURSOR_DY` | `-1`, `0`, `0` | Manual nudge: move every draw of sprite `PAD_CURSOR_ID` by (DX, DY) game pixels outside flight. `-1` = off. Not needed with `CURSOR_FIX`. |
 | `MODE` | `0` | Spike test mode when VR is not active: `0` normal, `1` camera sweep, `2` side-by-side stereo. |
 | `IPD`, `SWEEP_DEG`, `FOV_SCALE`, `EYE_W`, `EYE_H` | — | Parameters of the spike test modes (eye separation, sweep angle, FOV multiplier, dump size). |
 
