@@ -182,7 +182,7 @@ Eight cheats. All work in flight; **Get cash** and **Fast forward** also work on
 | Setting | Default | Effect |
 |---|---|---|
 | `AUTOPLAY` | `0` | Replay `macro.txt` at game start (e.g. menus → into space). Real input is blocked during the replay, including the VR controllers (pointer, clicks, buttons, sticks). Pressing **Esc** (keyboard, or the VR Esc button) stops the replay: it means the sequence went wrong. The replay pauses while the game window is not focused. |
-| `AUTORECORD` | `0` | Start recording an input macro at game start. Ctrl+F2 stops and saves to `macro.txt`. |
+| `AUTORECORD` | `0` | Start recording an input macro at game start. Ctrl+F2 stops and saves to `macro.txt`. The VR controllers (pointer, clicks, Esc, command buttons) are recorded like the mouse and keyboard. Quitting the game while recording also saves it, without the final Alt+X (quit) and anything after it. |
 
 ## Diagnostics and spike tools
 

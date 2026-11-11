@@ -24,7 +24,7 @@
 #endif
 void Capture_Install(LogFn log);
 void Capture_SetOverlayCallback(void (*f)(uint8_t*, int, int, int));
-void Macro_Start(const char* dir, bool autoplay, LogFn log);
+void Macro_Start(const char* dir, bool autoplay, LogFn log); void Macro_Shutdown();
 void Smooth_Install(LogFn log); void Smooth_SetSpeed(int speed); void Smooth_SetGameThread(); void Smooth_Report(double seconds); void Smooth_SetIdleCallback(void (*cb)());
 
 // ---------------------------------------------------------------- addresses (DARK.EXE 1997-10-15)
@@ -683,9 +683,14 @@ static void PanelLayout() {
         }
     }
 }
+static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H);
 extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
     g_frameDone = true;
     PanelLayout();
+    if (g_lastCol) {   // flight: the cheat message into the game's frame after its HUD (p2den's flight upload is not hooked)
+        br_pixelmap* gc = (br_pixelmap*)g_lastCol;
+        if (gc->width == 640 && gc->height == 480) DrawCheatOverlay(gc->pixels + gc->base_y * gc->row_bytes + gc->base_x, gc->row_bytes, 640, 480);
+    }
     if (g_retInEyes && g_lastCol) {   // crosshair source for the next frames' eye images
         br_pixelmap* gc = (br_pixelmap*)g_lastCol;
         if (gc->width == 640 && gc->height == 480) {
@@ -1419,7 +1424,6 @@ static void RenderVrCore() {
 // Extra frame while the game waits for its next cycle (called from p2den's spin-wait on the game thread).
 static void GroundCheats();
 static void IdleTick() {
-    GroundCheats();
     if (!g_frameDone || !g_smooth) return;
     LONGLONG now = Now(); g_lastSpin = now;
     if (Vr_FrameCounter() == g_lastVrFrame || !Vr_Active()) return;
@@ -1480,6 +1484,7 @@ static volatile float g_pitchValue, g_yawValue, g_speedValue; static volatile bo
 static void SendKey(uint8_t sc, bool down) {
     INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wScan = sc;
     in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP) | (sc == 0x1C && false ? KEYEVENTF_EXTENDEDKEY : 0);
+    in.ki.dwExtraInfo = P2VR_INPUT_TAG;   // (recorded by the input recorder like real input)
     SendInput(1, &in, sizeof in);
 }
 static bool GameInFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
@@ -1610,6 +1615,7 @@ static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_
 // Red confirmation message of a cheat, drawn into the game's HUD image (PostHud), so it shows on the desktop and in the
 // headset (on the HUD glass, centred above the crosshair, clear of the HUD panels) for 2.5 s.
 static char g_cheatMsg[96]; static DWORD g_cheatMsgUntil; static std::vector<uint8_t> g_cheatMask; static int g_cheatMaskFor = -1;
+static int g_cheatTextX0 = 0, g_cheatTextX1 = 640;   // horizontal extent of the text in the mask
 static const int CHEAT_MSG_Y = 132, CHEAT_MSG_H = 22;
 static void CheatMessage(const char* fmt, ...) {
     va_list a; va_start(a, fmt); vsprintf_s(g_cheatMsg, fmt, a); va_end(a);
@@ -1619,6 +1625,7 @@ static void CheatMessage(const char* fmt, ...) {
 // 4:3 picture is centred and scaled
 static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
     if (!g_cheatMsg[0] || (int)(GetTickCount() - g_cheatMsgUntil) > 0 || !data) return;
+    {   static DWORD lastLog; if (GetTickCount() - lastLog > 2000) { lastLog = GetTickCount(); Log("[cheat] message drawn into a %dx%d frame (pitch %d): %s", W, H, pitch, g_cheatMsg); } }
     static int msgSerial; static char drawn[96];
     if (strcmp(drawn, g_cheatMsg) || g_cheatMaskFor < 0) {   // text -> 640 x 22 mask, through GDI
         strcpy_s(drawn, g_cheatMsg); g_cheatMaskFor = ++msgSerial;
@@ -1635,17 +1642,30 @@ static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
             GdiFlush();
             const uint8_t* px = (const uint8_t*)bits;
             for (int i = 0; i < 640 * CHEAT_MSG_H; i++) g_cheatMask[i] = px[i * 4 + 1] > 128;
+            g_cheatTextX0 = 640; g_cheatTextX1 = 0;
+            for (int i = 0; i < 640 * CHEAT_MSG_H; i++) if (g_cheatMask[i]) { int x = i % 640; if (x < g_cheatTextX0) g_cheatTextX0 = x; if (x + 1 > g_cheatTextX1) g_cheatTextX1 = x + 1; }
             SelectObject(dc, of); DeleteObject(f); SelectObject(dc, ob); DeleteObject(bmp);
         }
         DeleteDC(dc);
     }
-    // the colour that shows red: p2den displays the HUD layer with red and blue swapped against the palette (UpdateHudSwapLut)
-    uint8_t pal[1024]; GetPalRGBX(pal); int red = 1, best = 1 << 30;
-    for (int c = 1; c < 256; c++) { int dr = pal[c*4+2] - 255, dg = pal[c*4+1] - 30, db = pal[c*4] - 30, e = dr*dr + 2*dg*dg + 2*db*db; if (e < best) { best = e; red = c; } }
+    // the colour that shows red: in flight p2den displays the HUD layer with red and blue swapped against the palette
+    // (UpdateHudSwapLut); the ground screens (menus, bases, PAD) use the palette as it is
+    bool flight = GetTickCount() - g_lastFlightTick < 500;
+    uint8_t pal[1024]; GetPalRGBX(pal); int red = 1, best = 1 << 30, ri = flight ? 2 : 0, bi = flight ? 0 : 2;
+    // the most vivid bright red the palette has (each screen has its own palette; a plain "closest to red" can be dull)
+    best = -(1 << 30);
+    for (int c = 1; c < 256; c++) { int R = pal[c*4+ri], G = pal[c*4+1], B = pal[c*4+bi], s = 2 * R - G - B + R / 2 - 3 * abs(G - B) / 2; if (s > best) { best = s; red = c; } }
+    {   static DWORD lastLog; if (GetTickCount() - lastLog > 2000) { lastLog = GetTickCount();
+            Log("[cheat] message colour index %d = %d,%d,%d (%s, palette from %s)", red, pal[red*4], pal[red*4+1], pal[red*4+2], flight ? "flight" : "ground", Capture_GetPalette(pal) ? "p2den" : "game"); } }
     float pw = H * 4.f / 3.f, ph = (float)H; if (pw > W) { pw = (float)W; ph = W * 3.f / 4.f; }   // the game's 4:3 picture
     float ox = (W - pw) * 0.5f, oy = (H - ph) * 0.5f, s = ph / 480.f;
     int y0 = (int)(oy + CHEAT_MSG_Y * s), y1 = (int)(oy + (CHEAT_MSG_Y + CHEAT_MSG_H) * s), x0 = (int)ox, x1 = (int)(ox + pw);
     int sh = s >= 2 ? (int)s : 1;                                                        // shadow offset
+    {   // black box behind the text (index 0: black on the screens; see-through on the VR HUD glass), 8 px margin
+        int bx0 = (int)(ox + (g_cheatTextX0 - 8) * s), bx1 = (int)(ox + (g_cheatTextX1 + 8) * s);
+        for (int y = y0 > 0 ? y0 : 0; y < y1 && y < H; y++) { uint8_t* row = data + (size_t)y * pitch;
+            for (int x = bx0 > 0 ? bx0 : 0; x < bx1 && x < W; x++) row[x] = 0; }
+    }
     for (int y = y0; y < y1 && y < H; y++) {
         int my = (int)((y - oy) / s) - CHEAT_MSG_Y; if (my < 0 || my >= CHEAT_MSG_H) continue;
         uint8_t* row = data + (size_t)y * pitch;
@@ -1834,6 +1854,10 @@ static void GroundCheats() {
     static DWORD last; DWORD now = GetTickCount();
     if (now - last < 20) return;
     last = now;
+    {   // debug: a file named 'msgtest' in the game folder shows a test message (checks the message overlay)
+        static DWORD lastChk; if (now - lastChk > 500) { lastChk = now; char f[MAX_PATH]; sprintf_s(f, "%s\\msgtest", g_dir);
+            if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); CheatMessage("CHEAT: TEST MESSAGE"); g_cheatMsgUntil = now + 15000; Log("[cheat] test message"); } }
+    }
     {   // bug-report capture on the ground (menus, bases, PAD): the displayed screen, context, settings and log
         static bool was; bool f9 = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_F9) & 0x8000) && GameInFront();
         if (f9 && !was && now - g_lastFlightTick >= 500 && !g_capDir[0]) {
@@ -2558,6 +2582,7 @@ extern "C" HRESULT WINAPI P2VR_DirectDrawCreate(GUID* g, void** dd, IUnknown* o)
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_DETACH) { Macro_Shutdown(); return TRUE; }   // e.g. a recording ended by quitting the game
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
         GetModuleFileNameA(h, g_dir, MAX_PATH); *strrchr(g_dir, '\\') = 0;
@@ -2617,6 +2642,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         if (g_vrEnable) { Capture_Install(Log); Capture_SetOverlayCallback(DrawCheatOverlay); Vr_Start(p, Log); Vr_SetObserverBack(g_observerBack); }
         Smooth_Install(Log);
         Smooth_SetIdleCallback(IdleTick);
+        // ground cheats, ground captures (Ctrl+F9) and the test trigger: own thread, every phase (menus, bases and films do not
+        // go through the flight routines or p2den's frame pacing on the game thread)
+        CreateThread(nullptr, 0, [](LPVOID) -> DWORD { for (;;) { Sleep(20); GroundCheats(); } }, nullptr, 0, nullptr);
         Macro_Start(g_dir, GetPrivateProfileIntA("VR", "AUTOPLAY", 0, p) != 0, Log);
     }
     return TRUE;

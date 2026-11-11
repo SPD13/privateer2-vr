@@ -37,6 +37,9 @@ struct VrControls {
     bool  anyButton;              // any button / trigger / grip held (commands and menu actions)
 };
 bool Macro_Replaying();
+// input the mod sends for the VR controllers (pointer, clicks, Esc, command keys) carries this dwExtraInfo, so the input
+// recorder records it like real input (other synthetic input, e.g. a replay, is not recorded)
+#define P2VR_INPUT_TAG 0x50325652
 int Macro_TakeCheatKeys();         // macro.cpp: Ctrl+1..8 pressed since the last call (bit per cheat)
 void Macro_Abort(const char* why);   // stop a running replay            // macro.cpp: a recorded input sequence (e.g. AUTOPLAY) is being replayed
 void Vr_SetCursorOffset(int x, int y);   // game pixels: the screen draws its cursor this far right/down of the mouse

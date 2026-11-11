@@ -492,7 +492,7 @@ static HWND GameWnd() {
     return f.best;
 }
 static bool GameFront() { DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid); return pid == GetCurrentProcessId(); }
-static void MouseButton(DWORD flag) { INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = flag; SendInput(1, &in, sizeof in); }
+static void MouseButton(DWORD flag) { INPUT in = {}; in.type = INPUT_MOUSE; in.mi.dwFlags = flag; in.mi.dwExtraInfo = P2VR_INPUT_TAG; SendInput(1, &in, sizeof in); }
 // Ray from the right controller onto the virtual screen -> move the real mouse there; trigger/grip = clicks.
 static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW, float screenY) {
     s_ptrHit = false;
@@ -531,7 +531,7 @@ static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW
                     int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
                     INPUT in = {}; in.type = INPUT_MOUSE;
                     in.mi.dx = LONG((pt.x - vx) * 65535.0 / (vw - 1)); in.mi.dy = LONG((pt.y - vy) * 65535.0 / (vh - 1));
-                    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+                    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK; in.mi.dwExtraInfo = P2VR_INPUT_TAG;
                     SendInput(1, &in, sizeof in);
                 }
             }
@@ -549,7 +549,7 @@ static void UpdatePointer(XrTime t, bool flight, float screenDist, float screenW
     // Escape (skip films, leave screens)
     static bool escWas;
     b = {XR_TYPE_ACTION_STATE_BOOLEAN}; gi.action = s_actEsc; bool esc = XR_SUCCEEDED(xrGetActionStateBoolean(sess, &gi, &b)) && b.isActive && b.currentState;
-    if (front && esc != escWas) { INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wScan = 0x01; in.ki.dwFlags = KEYEVENTF_SCANCODE | (esc ? 0 : KEYEVENTF_KEYUP); SendInput(1, &in, sizeof in); }
+    if (front && esc != escWas) { INPUT in = {}; in.type = INPUT_KEYBOARD; in.ki.wScan = 0x01; in.ki.dwFlags = KEYEVENTF_SCANCODE | (esc ? 0 : KEYEVENTF_KEYUP); in.ki.dwExtraInfo = P2VR_INPUT_TAG; SendInput(1, &in, sizeof in); }
     escWas = esc;
 }
 // Beam: a thin quad from the controller to the hit point, turned around its axis to face the viewer.

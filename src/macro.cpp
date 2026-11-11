@@ -51,6 +51,21 @@ static void BringGameToFront() {
 }
 
 static void Save() {
+    // a recording that ends by quitting the game (Alt+X) must not replay the quit: drop the last Alt+X and everything after
+    EnterCriticalSection(&s_cs);
+    int x = -1;
+    for (int i = (int)s_rec.size() - 1; i >= 0 && x < 0; i--) if (s_rec[i].type == 'K' && s_rec[i].c == 'X' && !(s_rec[i].b & 1)) x = i;
+    if (x >= 0) {
+        int cut = x;
+        for (int i = x - 1; i >= 0; i--) {                      // back to the Alt press held for it
+            if (s_rec[i].type != 'K' || s_rec[i].a != 0x38) continue;
+            if (!(s_rec[i].b & 1)) cut = i;
+            break;
+        }
+        bool alt = cut < x;
+        if (alt) { Log("[macro] dropped the final Alt+X (quit) and %zu event(s) after it", s_rec.size() - cut); s_rec.resize(cut); }
+    }
+    LeaveCriticalSection(&s_cs);
     FILE* f; if (fopen_s(&f, s_path, "w")) return;
     fprintf(f, "# p2vr input macro: time_s type a b c (P = pointer in the 4:3 game picture, 0..10000)\n");
     EnterCriticalSection(&s_cs);
@@ -175,7 +190,7 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             if (!up) InterlockedOr(&s_cheatKeys, 1 << (k->vkCode - '1'));
             return 1;
         }
-        if (s_recording && !injected && GameHasFocus() && k->vkCode != VK_F2 && k->vkCode != VK_F3)
+        if (s_recording && (!injected || k->dwExtraInfo == P2VR_INPUT_TAG) && GameHasFocus() && k->vkCode != VK_F2 && k->vkCode != VK_F3)
             Add('K', (int)k->scanCode, (up ? 1 : 0) | ((k->flags & LLKHF_EXTENDED) ? 2 : 0), (int)k->vkCode);
     }
     return CallNextHookEx(nullptr, code, wp, lp);
@@ -189,7 +204,7 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
     }
     if (code == HC_ACTION && s_recording) {
         auto* m = (MSLLHOOKSTRUCT*)lp;
-        if (!(m->flags & LLMHF_INJECTED) && GameHasFocus()) {
+        if ((!(m->flags & LLMHF_INJECTED) || m->dwExtraInfo == P2VR_INPUT_TAG) && GameHasFocus()) {   // real or VR pointer
             HWND w = GameWindow();
             if (wp == WM_MOUSEMOVE) {
                 double t = NowS();
@@ -229,6 +244,14 @@ static DWORD WINAPI HookThread(LPVOID autoplay) {
 }
 
 bool Macro_Replaying() { return s_replaying; }
+// the game is closing: a recording still running is saved (e.g. ended with Alt+X instead of Ctrl+F2)
+void Macro_Shutdown() {
+    if (!s_recording) return;
+    s_recording = false;
+    Save();
+    EnterCriticalSection(&s_cs); size_t n = s_rec.size(); LeaveCriticalSection(&s_cs);
+    Log("[macro] game closing: recording saved (%zu events) to %s", n, s_path);
+}
 // cheat hotkeys pressed since the last call (bit 0 = Ctrl+1 ... bit 4 = Ctrl+5)
 int Macro_TakeCheatKeys() { return (int)InterlockedExchange(&s_cheatKeys, 0); }
 // Esc pressed by the player (keyboard or VR controller) while a replay runs: the sequence went wrong -> stop it

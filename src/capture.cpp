@@ -1,7 +1,7 @@
 // capture.cpp - grabs p2den.dll's final D3D11 frame (HUD, menus, FMV) into a shared texture.
 // p2den imports CreateDXGIFactory; we patch that import, then hook CreateSwapChain(ForHwnd) on the
 // returned factory and Present on the created swapchain.
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <d3dcompiler.h>
 #include <vector>
 #include <dxgi1_2.h>
@@ -178,7 +178,19 @@ static ID3D11Texture2D* gPalTex; static bool gPalLogged;
 typedef HRESULT (STDMETHODCALLTYPE *PFN_Map)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 typedef void (STDMETHODCALLTYPE *PFN_Unmap)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 typedef void (STDMETHODCALLTYPE *PFN_UpdateSub)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+typedef void (STDMETHODCALLTYPE *PFN_UpdateSub1)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT, UINT);
 static PFN_Map oMap; static PFN_Unmap oUnmap; static PFN_UpdateSub oUpdateSub;
+// Contexts may each carry their own vtable (an overlay layer wrapping the context): the original functions are kept per
+// vtable, and the hooks call the ones of the context they are called on.
+struct CtxOrig { void** vt; PFN_Map map; PFN_Unmap unmap; PFN_UpdateSub upd; PFN_UpdateSub1 upd1;
+                 PFN_Map map0; PFN_Unmap unmap0; PFN_UpdateSub upd0; PFN_UpdateSub1 upd10; };   // *0: the first originals
+static __declspec(thread) int tDepth;   // > 0 inside one of our context hooks
+static CtxOrig gCtxOrig[8]; static int gNCtxOrig;
+static const CtxOrig* OrigFor(ID3D11DeviceContext* c) {
+    void** vt = *(void***)c;
+    for (int i = 0; i < gNCtxOrig; i++) if (gCtxOrig[i].vt == vt) return &gCtxOrig[i];
+    return gNCtxOrig ? &gCtxOrig[0] : nullptr;
+}
 static void* gPalMapped; static ID3D11Resource* gPalMappedRes; static UINT gPalMappedPitch;
 
 
@@ -237,18 +249,31 @@ static void StorePalette(const void* data, UINT rowPitch, DXGI_FORMAT fmt, ID3D1
 // the overlay callback (p2vr: cheat messages) draws into that copy just before Unmap, so it shows on the desktop and in the
 // headset in every game phase, without touching the game's own buffers.
 static void (*gOverlayCb)(uint8_t* data, int pitch, int w, int h);
+static IUnknown* gFrameDevice;   // the device of the swapchain p2den presents with
+static bool IsP2denRes(ID3D11Resource* r) {
+    ID3D11Device* dev = nullptr; r->GetDevice(&dev);
+    IUnknown* id = nullptr; if (dev) { dev->QueryInterface(__uuidof(IUnknown), (void**)&id); dev->Release(); }
+    bool p2den = id && ((gP2denDevice && id == gP2denDevice) || (gFrameDevice && id == gFrameDevice)); if (id) id->Release();
+    return p2den;
+}
 void Capture_SetOverlayCallback(void (*f)(uint8_t*, int, int, int)) { gOverlayCb = f; }
 static ID3D11Resource* gIdxMappedRes; static uint8_t* gIdxMapped; static int gIdxPitch, gIdxW, gIdxH;
 static HRESULT STDMETHODCALLTYPE HkMap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT f, D3D11_MAPPED_SUBRESOURCE* m) {
-    HRESULT hr = oMap(c, r, sub, t, f, m);
+    const CtxOrig* o = OrigFor(c);
+    if (tDepth) return o->map0(c, r, sub, t, f, m);
+    static bool first; if (!first) { first = true; Log("[cap] first Map call"); }
+    tDepth++; HRESULT hr = o->map(c, r, sub, t, f, m); tDepth--;
     DXGI_FORMAT fmt;
     if (SUCCEEDED(hr) && m && t != D3D11_MAP_READ && IsPaletteTex(r, &fmt)) { gPalMapped = m->pData; gPalMappedRes = r; gPalMappedPitch = m->RowPitch; }
     else if (SUCCEEDED(hr) && m && t != D3D11_MAP_READ && gOverlayCb && r) {
         D3D11_RESOURCE_DIMENSION dim; r->GetType(&dim);
         if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
             D3D11_TEXTURE2D_DESC d; ((ID3D11Texture2D*)r)->GetDesc(&d);
-            if (d.Format == DXGI_FORMAT_R8_UNORM && d.Usage == D3D11_USAGE_STAGING && d.Width >= 640 && d.Height >= 480) {
+            if (d.Format == DXGI_FORMAT_R8_UNORM && d.Width >= 640 && d.Height >= 480 && IsP2denRes(r)) {   // staging or dynamic
                 gIdxMappedRes = r; gIdxMapped = (uint8_t*)m->pData; gIdxPitch = (int)m->RowPitch; gIdxW = (int)d.Width; gIdxH = (int)d.Height;
+                static uint32_t seen[8]; static int ns; uint32_t key = (d.Width << 16) ^ d.Height ^ (d.Usage << 28) ^ (t << 24);
+                bool known = false; for (int i = 0; i < ns; i++) if (seen[i] == key) known = true;
+                if (!known && ns < 8) { seen[ns++] = key; Log("[cap] 8-bit frame upload: Map %ux%u usage %d map type %d - overlay on", d.Width, d.Height, d.Usage, t); }
             }
         }
     }
@@ -264,12 +289,36 @@ static void STDMETHODCALLTYPE HkUnmap(ID3D11DeviceContext* c, ID3D11Resource* r,
         if (gOverlayCb) gOverlayCb(gIdxMapped, gIdxPitch, gIdxW, gIdxH);
         gIdxMapped = nullptr; gIdxMappedRes = nullptr;
     }
-    oUnmap(c, r, sub);
+    if (tDepth) { OrigFor(c)->unmap0(c, r, sub); return; }
+    tDepth++; OrigFor(c)->unmap(c, r, sub); tDepth--;
+}
+// data sent with (Update)Subresource: palette capture, and the 8-bit frame with the overlay drawn on a copy (returned)
+static const void* UploadData(const char* via, ID3D11Resource* r, const D3D11_BOX* box, const void* data, UINT rp) {
+    DXGI_FORMAT fmt;
+    if (data && !box && IsPaletteTex(r, &fmt)) { StorePalette(data, rp ? rp : 1024, fmt, r); return data; }
+    if (!data || !gOverlayCb || !r || !rp) return data;
+    D3D11_RESOURCE_DIMENSION dim; r->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) return data;
+    D3D11_TEXTURE2D_DESC d; ((ID3D11Texture2D*)r)->GetDesc(&d);
+    if (d.Format != DXGI_FORMAT_R8_UNORM || d.Width < 640 || d.Height < 480 || !IsP2denRes(r)) return data;
+    UINT w = box ? box->right - box->left : d.Width, h = box ? box->bottom - box->top : d.Height;
+    static uint32_t seen[8]; static int ns; uint32_t key = (d.Width << 16) ^ d.Height ^ (box ? 0x80000000u : 0) ^ (via[16] ? 0x40000000u : 0);
+    bool known = false; for (int i = 0; i < ns; i++) if (seen[i] == key) known = true;
+    if (!known && ns < 8) { seen[ns++] = key; Log("[cap] 8-bit frame upload: %s %ux%u (texture %ux%u, usage %d) - overlay on", via, w, h, d.Width, d.Height, d.Usage); }
+    if (box && !(box->left == 0 && box->top == 0 && w == d.Width && h == d.Height)) return data;
+    static std::vector<uint8_t> copy; copy.assign((const uint8_t*)data, (const uint8_t*)data + (size_t)rp * h);
+    gOverlayCb(copy.data(), (int)rp, (int)w, (int)h);
+    return copy.data();
 }
 static void STDMETHODCALLTYPE HkUpdateSub(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* data, UINT rp, UINT dp) {
-    DXGI_FORMAT fmt;
-    if (data && !box && IsPaletteTex(r, &fmt)) StorePalette(data, rp ? rp : 1024, fmt, r);
-    oUpdateSub(c, r, sub, box, data, rp, dp);
+    if (tDepth) { OrigFor(c)->upd0(c, r, sub, box, data, rp, dp); return; }
+    static bool first; if (!first) { first = true; Log("[cap] first UpdateSubresource call"); }
+    tDepth++; OrigFor(c)->upd(c, r, sub, box, UploadData("UpdateSubresource", r, box, data, rp), rp, dp); tDepth--;
+}
+static void STDMETHODCALLTYPE HkUpdateSub1(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* data, UINT rp, UINT dp, UINT flags) {
+    if (tDepth) { OrigFor(c)->upd10(c, r, sub, box, data, rp, dp, flags); return; }
+    static bool first; if (!first) { first = true; Log("[cap] first UpdateSubresource1 call"); }
+    tDepth++; OrigFor(c)->upd1(c, r, sub, box, UploadData("UpdateSubresource1", r, box, data, rp), rp, dp, flags); tDepth--;
 }
 static ID3D11Texture2D* gP2denPalTex; static DXGI_FORMAT gP2denPalFmt;
 static ID3D11Texture2D* gPalStage[3]; static uint32_t gPalFrame;
@@ -369,6 +418,44 @@ static void PatchVtbl(void** vt, int idx, void* hook, void** orig) {
     vt[idx] = hook;
     VirtualProtect(&vt[idx], sizeof(void*), old, &old);
 }
+// Map / Unmap / UpdateSubresource(1) hooks on a context (palette capture, frame overlay); originals kept per vtable
+static void HookContext(ID3D11DeviceContext* hc, const char* what) {
+    if (!hc) return;
+    void** vt = *(void***)hc;
+    for (int i = 0; i < gNCtxOrig; i++) if (gCtxOrig[i].vt == vt) {
+        // something replaced our entries since (D3D11 switching implementations, an overlay hooking): chain to what is
+        // there now and hook again; the re-entry guard keeps a hook that calls back into ours from looping
+        CtxOrig& o = gCtxOrig[i]; bool redo = false;
+        auto rehook = [&](int idx, void* hook, void** orig) {
+            if (vt[idx] == hook || !vt[idx]) return;
+            void* now = vt[idx]; HMODULE m = nullptr; char name[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)now, &m)) GetModuleFileNameA(m, name, MAX_PATH);
+            static int logs; if (logs < 8) { logs++; Log("[cap] %s: context entry %d was replaced by %p (%s): chained and hooked again%s", what, idx, now, name, logs == 8 ? " (not logged any more)" : ""); }
+            *orig = now; void* dummy = nullptr; PatchVtbl(vt, idx, hook, &dummy); redo = true;
+        };
+        rehook(14, (void*)HkMap, (void**)&o.map); rehook(15, (void*)HkUnmap, (void**)&o.unmap); rehook(48, (void*)HkUpdateSub, (void**)&o.upd);
+        if (o.upd1) rehook(116, (void*)HkUpdateSub1, (void**)&o.upd1);
+        (void)redo; return;
+    }
+    Log("[cap] %s context %p vtable %p map %p", what, hc, vt, vt[14]);
+    if (gNCtxOrig >= 8 || vt[14] == (void*)HkMap) return;
+    CtxOrig& o = gCtxOrig[gNCtxOrig]; o = {}; o.vt = vt;
+    PFN_Map m0 = nullptr; PFN_Unmap u0 = nullptr; PFN_UpdateSub s0 = nullptr; PFN_UpdateSub1 s1 = nullptr;
+    m0 = (PFN_Map)vt[14]; u0 = (PFN_Unmap)vt[15]; s0 = (PFN_UpdateSub)vt[48];
+    ID3D11DeviceContext1* c1 = nullptr;   // UpdateSubresource1 (ID3D11DeviceContext1, slot 116)
+    bool has1 = SUCCEEDED(hc->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&c1)) && c1 && *(void***)c1 == vt;
+    if (c1) c1->Release();
+    if (has1) s1 = (PFN_UpdateSub1)vt[116];
+    o.map = m0; o.unmap = u0; o.upd = s0; o.upd1 = s1;
+    o.map0 = m0; o.unmap0 = u0; o.upd0 = s0; o.upd10 = s1;
+    gNCtxOrig++;                                                       // originals in place before the hooks go live
+    void* dummy = nullptr;
+    dummy = nullptr; PatchVtbl(vt, 14, (void*)HkMap, &dummy);
+    dummy = nullptr; PatchVtbl(vt, 15, (void*)HkUnmap, &dummy);
+    dummy = nullptr; PatchVtbl(vt, 48, (void*)HkUpdateSub, &dummy);
+    if (has1) { dummy = nullptr; PatchVtbl(vt, 116, (void*)HkUpdateSub1, &dummy); }
+    Log("[cap] context hooks on %p (%s, vtable %p): Map, Unmap, UpdateSubresource%s", hc, what, vt, has1 ? ", UpdateSubresource1" : "");
+}
 
 static void CaptureFrame(IDXGISwapChain* sc) {
     ID3D11Texture2D* bb = nullptr;
@@ -376,6 +463,8 @@ static void CaptureFrame(IDXGISwapChain* sc) {
     D3D11_TEXTURE2D_DESC d; bb->GetDesc(&d);
     ID3D11Device* dev = nullptr; bb->GetDevice(&dev);
     ID3D11DeviceContext* c = nullptr; dev->GetImmediateContext(&c);
+    if (!gFrameDevice) dev->QueryInterface(__uuidof(IUnknown), (void**)&gFrameDevice);
+    HookContext(c, "presenting device");   // every frame: (re)hooks if its entries were replaced
     if (!gShared || d.Width != gW || d.Height != gH) {
         if (gShared) { gShared->Release(); gShared = nullptr; }
         D3D11_TEXTURE2D_DESC s = d;
@@ -494,6 +583,18 @@ static HRESULT WINAPI HkD3D11CreateDevice(IDXGIAdapter* a, D3D_DRIVER_TYPE dt, H
             DXGI_ADAPTER_DESC d; ad->GetDesc(&d); char n[128]; WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, n, 128, 0, 0);
             Log("[cap] p2den D3D11 device on '%s'", n);
             PatchVtbl(*(void***)*dev, 5, (void*)HkCreateTex2D, (void**)&oCreateTex2D);
+            ID3D11DeviceContext* ic = nullptr; (*dev)->GetImmediateContext(&ic);
+            HookContext(ic, "created device");
+            if (ctx && *ctx) HookContext(*ctx, "created device (returned)");
+            if (ic) {
+                const IID* iids[4] = {&__uuidof(ID3D11DeviceContext1), &__uuidof(ID3D11DeviceContext2), &__uuidof(ID3D11DeviceContext3), &__uuidof(ID3D11DeviceContext4)};
+                void** vt0 = *(void***)ic;
+                Log("[cap] ctx %p vtbl %p map %p upd %p (hooked %p)", ic, vt0, vt0[14], vt0[48], (void*)HkMap);
+                for (int k = 0; k < 4; k++) { IUnknown* q = nullptr;
+                    if (SUCCEEDED(ic->QueryInterface(*iids[k], (void**)&q)) && q) { void** vt = *(void***)q;
+                        Log("[cap] ctx%d %p vtbl %p map %p upd %p", k + 1, q, vt, vt[14], vt[48]); q->Release(); } }
+            }
+            if (ic) ic->Release();
 
             PatchFactory(fac, "D3D11CreateDevice");
         }
