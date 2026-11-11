@@ -65,7 +65,11 @@ In VR:
 
 ### VR controllers
 
-The sticks fly the ship; buttons press the game's own keys. These are the default bindings:
+The sticks fly the ship; buttons press the game's own keys. The default flight controls on the Steam Frame controllers:
+
+![Steam Frame controllers with the default flight controls](docs/steam-frame-controls.png)
+
+All default bindings, for every controller type:
 
 | Control | Index / Quest (Touch) | Steam Frame |
 |---|---|---|
@@ -288,6 +292,7 @@ Pushing a tag `vX.Y.Z` builds and publishes a release: the mod archive `privatee
 - `SPIKE_REPORT.md`: the feasibility spike and its go/no-go result.
 - `notes/RE_NOTES.md`: addresses, structures and algorithms found by reverse engineering.
 - `docs/hud-positioning.png`: the HUD positioning diagram, drawn by `scripts/make_hud_diagram.py` from the default panel layout and an in-game HUD capture (`docs/hud-capture.png`). Run it again after changing the panel defaults.
+- `docs/steam-frame-controls.png`: the Steam Frame controller bindings, drawn by `scripts/make_controller_diagram.py` from a photo of the controllers. Run it again after changing the Frame defaults in `src/commands.h`.
 
 ## Credits and legal
 
