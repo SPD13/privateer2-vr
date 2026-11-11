@@ -103,6 +103,7 @@ static EyeSet   s_sets[3];
 static int      s_back = 0, s_ready = -1, s_inUse = -1;
 static DWORD    s_lastEyeTick;
 static uint32_t s_eyeCount, s_eyeCountAtScreen; static LARGE_INTEGER s_lastEyeQpc; static bool s_screenFlight;   // see Vr_SetScreenSource
+static volatile DWORD s_lastScreenTick;   // when the last screen frame was presented
 
 // HUD markers (8-bit) from the game thread
 static std::vector<uint8_t> s_mk; static int s_mkW, s_mkH; static uint8_t s_mkPal[1024]; static bool s_mkNew;
@@ -208,7 +209,7 @@ static volatile LONG s_flatDraws; static LONG s_flatDrawsAtScreen;
 void Vr_NoteFlatDraw() { InterlockedIncrement(&s_flatDraws); }
 void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     EnterCriticalSection(&s_cs);
-    s_screenHandle = h; s_screenW = w; s_screenH = hgt; s_screenFrame = frame;
+    s_screenHandle = h; s_screenW = w; s_screenH = hgt; s_screenFrame = frame; s_lastScreenTick = GetTickCount();
     // this screen frame belongs to flight if the eyes were rendered for it: since the previous screen frame, or just now.
     // The first flat frame (nav map, options...) has none, so the headset switches to the flat screen on that very
     // frame instead of up to 300 ms later (the frozen space view with the flat image laid over it as a HUD).
@@ -439,6 +440,15 @@ static Swap beamSc; static bool beamReady;
 // fade through black between the flight view and a flat screen (TRANSITION_FADE): the old view fades out, the switch
 // happens under full black, the new view fades in
 static Swap fadeSc; static bool fadeReady; static float s_fadeMs = 500.0f; static const int FADE_STEPS = 32;
+// A dialog the game opens over flight (Alt+X "quit?"): the headset stays in flight (frozen space, HUD and panels) and
+// shows the dialog, cut out of the screen, on the HUD glass where the game draws it; the VR pointer aims at the glass.
+static Swap dlgSc; static bool dlgReady; static volatile LONG s_dlgTick; static int s_dlgRect[4];
+void Vr_SetFlightDialog(int x0, int y0, int x1, int y1) {
+    EnterCriticalSection(&s_cs);
+    s_dlgRect[0] = x0; s_dlgRect[1] = y0; s_dlgRect[2] = x1; s_dlgRect[3] = y1;
+    LeaveCriticalSection(&s_cs);
+    InterlockedExchange(&s_dlgTick, (LONG)GetTickCount());
+}
 static HWND GameWnd();
 // Message panel shown instead of the (frozen) game while a desktop tool of the game is open (p2den's Alt+J joystick setup)
 static Swap msgSc[2]; static bool msgReady[2]; static const int MSG_W = 1280, MSG_H = 200;
@@ -774,6 +784,7 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
         }
         Log("[vr] transition fade %s (%.0f ms)", fadeReady ? "ready" : "FAILED", s_fadeMs);
     }
+    dlgReady = MakeSwap(dlgSc, 1024, 768);   // a dialog over flight (Alt+X), cut out of the screen
     EnterCriticalSection(&s_cs);
     s_target.width = w; s_target.height = h; s_target.tanHalfH = tH; s_target.tanHalfV = tV; s_targetValid = true;
     LeaveCriticalSection(&s_cs);
@@ -978,6 +989,32 @@ static void UpdateScreen(bool flight) {
     haveScreen = true;
 }
 
+// the dialog over flight: its rectangle of the screen frame, opaque, into dlgSc (only when a new frame came)
+static void UpdateDialog() {
+    HANDLE h; uint32_t fr; int r[4];
+    EnterCriticalSection(&s_cs); h = s_screenHandle; fr = s_screenFrame; memcpy(r, s_dlgRect, sizeof r); LeaveCriticalSection(&s_cs);
+    static uint32_t shown = 0xFFFFFFFF;
+    if (!scrSrv || h != scrOpened || fr == shown || r[2] <= r[0] || r[3] <= r[1]) return;
+    shown = fr;
+    float zero[52] = {}; ctx->UpdateSubresource(cbufPanels, 0, nullptr, zero, 0, 0); ctx->PSSetConstantBuffers(2, 1, &cbufPanels);
+    uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (XR_FAILED(xrAcquireSwapchainImage(dlgSc.sc, &ai, &i))) return;
+    XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; wi.timeout = XR_INFINITE_DURATION; xrWaitSwapchainImage(dlgSc.sc, &wi);
+    float cb[16] = {s_keyGain, 0.f, s_uScale, s_uOff, s_keyThresh, 0, 0, 0,
+                    r[0] / 640.f, r[1] / 480.f, (r[2] - r[0]) / 640.f, (r[3] - r[1]) / 480.f, 0, 0, 0, 0};
+    ctx->UpdateSubresource(cbuf, 0, nullptr, cb, 0, 0);
+    D3D11_VIEWPORT vp = {0, 0, (float)dlgSc.w, (float)dlgSc.h, 0, 1};
+    ctx->OMSetRenderTargets(1, &dlgSc.rtv[i], nullptr); ctx->RSSetViewports(1, &vp);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(vsFull, nullptr, 0); ctx->PSSetShader(psScreen, nullptr, 0);
+    ID3D11ShaderResourceView* srvs[3] = {nullptr, nullptr, scrSrv};
+    ctx->PSSetShaderResources(0, 3, srvs); ctx->PSSetSamplers(0, 1, &linSamp); ctx->PSSetConstantBuffers(0, 1, &cbuf);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* nulls[3] = {}; ctx->PSSetShaderResources(0, 3, nulls);
+    ID3D11Buffer* nullCb = nullptr; ctx->PSSetConstantBuffers(2, 1, &nullCb);
+    XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO}; xrReleaseSwapchainImage(dlgSc.sc, &ri);
+}
+
 static void HandleEvents() {
     XrEventDataBuffer ev = {XR_TYPE_EVENT_DATA_BUFFER};
     while (xrPollEvent(inst, &ev) == XR_SUCCESS) {
@@ -1058,7 +1095,12 @@ static void FrameLoop() {
         InterlockedExchange(&s_active, targetDone ? 1 : 0);
 
         EnterCriticalSection(&s_cs); bool screenFlight = s_screenFlight; LeaveCriticalSection(&s_cs);
-        bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300 && screenFlight;
+        // eyes not rendered for 300 ms while the game keeps presenting screen frames: it left flight. While the game
+        // presents nothing at all (a pause, e.g. before the Alt+X dialog), the frozen space view stays.
+        DWORD nowTick = GetTickCount();
+        bool eyesStale = nowTick - s_lastEyeTick >= 300 && (LONG)(s_lastScreenTick - s_lastEyeTick) > 100;
+        bool dialog = targetDone && nowTick - (DWORD)s_dlgTick < 400 && dlgReady;
+        bool flight = targetDone && ((!eyesStale && screenFlight) || dialog);
         {   static bool lastF; if (flight != lastF) { lastF = flight;
                 Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); } }
         // Fade through black: while the shown mode differs from the game's, the old view stays (its last images,
@@ -1091,13 +1133,17 @@ static void FrameLoop() {
         XrCompositionLayerQuad tip = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         bool toolOpen = targetDone && DesktopToolOpen();
         int msgSlot = toolOpen ? 0 : (targetDone && s_msgShow == 1) ? 1 : -1;
-        if (targetDone && sessState == XR_SESSION_STATE_FOCUSED && msgSlot < 0) UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
+        if (targetDone && sessState == XR_SESSION_STATE_FOCUSED && msgSlot < 0) {
+            if (dialog && flight) UpdatePointer(fs.predictedDisplayTime, false, s_hudDist, s_hudWidth, s_hudY);   // the dialog on the glass
+            else UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
+        }
         else s_ptrHit = false;
         XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[MAX_PANELS];
         if (fs.shouldRender && targetDone) {
             if (!fadeHold) {
                 if (flight) { UploadEyes(); UpdateMarkers(); }
-                UpdateScreen(flight);
+                if (dialog && flight) UpdateDialog();   // HUD and panels stay as they were; the dialog gets its own quad
+                else UpdateScreen(flight);
             }
             if (flight && haveEyeImage) {
                 for (int e = 0; e < 2; e++) {
@@ -1120,7 +1166,7 @@ static void FrameLoop() {
                     float inf = s_retDist > 0 ? s_retDist : 500.0f;
                     int shownPanels = 0; uint32_t pmask = (uint32_t)s_panelMask;
                     if (s_panelsOn) for (int k = 0; k < s_nPanels; k++) shownPanels += (pmask >> k) & 1;
-                    int budget = s_maxLayers - 3 - shownPanels - (fadeReady ? 1 : 0);   // projection, HUD, crosshair, panels in use, fade
+                    int budget = s_maxLayers - 3 - shownPanels - (fadeReady ? 1 : 0) - (dialog ? 3 : 0);   // projection, HUD, crosshair, panels in use, fade
                     for (int b = 0; b < s_nShownBlobs; b++) {
                         if ((int)layers.size() - 1 >= budget) break;
                         const VrMarkerBlob& bl = s_shownBlobs[b];
@@ -1204,7 +1250,17 @@ static void FrameLoop() {
                 }
             }
         }
-        if (!flight && haveScreen && targetDone && sessState == XR_SESSION_STATE_FOCUSED && fs.shouldRender) {
+        XrCompositionLayerQuad dlg = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (dialog && flight && fs.shouldRender && !layers.empty()) {   // the dialog, opaque, on the glass
+            int r[4]; EnterCriticalSection(&s_cs); memcpy(r, s_dlgRect, sizeof r); LeaveCriticalSection(&s_cs);
+            float hw = s_hudWidth, hh = s_hudWidth * 0.75f;
+            dlg.space = localSpace; dlg.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            dlg.subImage.swapchain = dlgSc.sc; dlg.subImage.imageRect = {{0, 0}, {dlgSc.w, dlgSc.h}};
+            dlg.size = {(r[2] - r[0]) / 640.f * hw, (r[3] - r[1]) / 480.f * hh};
+            dlg.pose = {{0, 0, 0, 1}, {((r[0] + r[2]) * 0.5f / 640.f - 0.5f) * hw, s_hudY + (0.5f - (r[1] + r[3]) * 0.5f / 480.f) * hh, -s_hudDist + 0.01f}};
+            layers.push_back((XrCompositionLayerBaseHeader*)&dlg);
+        }
+        if ((!flight || dialog) && haveScreen && targetDone && sessState == XR_SESSION_STATE_FOCUSED && fs.shouldRender) {
             XrVector3f head = {(s_views[0].pos[0] + s_views[1].pos[0]) * 0.5f, (s_views[0].pos[1] + s_views[1].pos[1]) * 0.5f, (s_views[0].pos[2] + s_views[1].pos[2]) * 0.5f};
             if (BeamLayer(beam, head)) layers.push_back((XrCompositionLayerBaseHeader*)&beam);
             if (s_ptrHit && beamReady) {   // aiming dot where the beam meets the screen (exact click point, any cursor graphic)

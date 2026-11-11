@@ -118,7 +118,12 @@ Ship slots for other ships: `0x1D..0x94` (29..148).
   - diary (Alt+D), options (Alt+O) and hotkeys (Alt+H): three blocks, 0x45C592..0x45CC90, 0x45D08A..0x45D526 and 0x45F400..0x45F622.
 - To find a new screen's call sites, log each distinct `ret` in `NotePostHudDraw` once, then open the screen from flight.
 - When the diary opens, the game runs one more plain flight cycle (only 0x44C265) between two diary frames. With the fade this is just a short dim, not a wrong frame.
-- 0x42207F (cursor 0x422626) draws after a switch to flat, so it is not a first-frame case.
+- **Alt+X quit dialog over flight:** the game pauses (no screen frames for ~1.7 s), then draws the dialog as one full-screen sprite (id 1, 640×480) from **0x42207F**, with its cursor at **0x422626**. Instead of switching to flat and back, the headset stays in flight:
+  - `NoteDialogDraw` (`p2vr.cpp`) reports the dialog if it opened within 3 s of the last flight frame; the cursor redraws keep it alive.
+  - `vr.cpp` keeps `flight` true while `Vr_SetFlightDialog` was called less than 400 ms ago. Space, HUD and panels stay frozen (`UpdateScreen` is skipped).
+  - `UpdateDialog` draws the dialog rectangle of the screen frame, opaque (`psScreen` with `keyOn` 0 and `map` = crop), into `dlgSc`, shown as a quad on the HUD glass.
+  - The VR pointer and beam aim at the glass: `UpdatePointer(..., s_hudDist, s_hudWidth, s_hudY)`. The flight buttons send nothing, since their keys go out from the paused game cycle.
+- **Eye-staleness fallback:** "no eye render for 300 ms" now only switches to flat while screen frames keep arriving (`s_lastScreenTick` more than 100 ms after the last eye render). During a pause with no frames, the frozen space view stays.
 
 The shown mode is `flight = targetDone && eyes rendered < 300 ms ago && screenFlight`.
 

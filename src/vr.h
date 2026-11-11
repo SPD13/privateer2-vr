@@ -27,6 +27,7 @@ void Vr_SetEyeCrosshair(int eye, const float rows[9], int bx0, int by0, int bx1,
 void Vr_NoteFlightFrame();
 void Vr_NoteFlatDraw();     // a 2D sprite drawn after the flight HUD (a flat screen being drawn)
 void Vr_NoteHudDone();      // the game drew its flight HUD this cycle   // a game cycle rendered the eyes (tags the next screen frame as flight)
+void Vr_SetFlightDialog(int x0, int y0, int x1, int y1);   // a dialog drawn over flight (Alt+X): its 640x480 rectangle
 void Vr_SetScreenSource(HANDLE sharedTex, int w, int h, uint32_t frameNo);  // from the p2den Present hook
 void Vr_RequestRecenter();
 

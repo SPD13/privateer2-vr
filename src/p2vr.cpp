@@ -2130,8 +2130,33 @@ static void NotePostHudDraw(uint32_t ret) {
     if (ret < 0x45a000 || ret >= 0x460000) return;
     Vr_NoteFlatDraw();
 }
+// The "quit?" dialog of Alt+X (sprite drawn at 0x42207f, its cursor at 0x422626). Opened from flight, the headset stays in
+// flight and shows the dialog on the HUD glass (Vr_SetFlightDialog), instead of switching to the flat screen and back.
+static void NoteDialogDraw(uint32_t ret, int id, void* shapes, const int* xy, const int* view) {
+    static DWORD last; static bool fromFlight; static int rect[4]; DWORD now = GetTickCount();
+    if (ret == 0x422626) {   // its cursor, redrawn while the dialog stays open: keeps it shown
+        if (fromFlight && now - last < 3000) { last = now; Vr_SetFlightDialog(rect[0], rect[1], rect[2], rect[3]); }
+        return;
+    }
+    if (ret != 0x42207f || !shapes) return;
+    const int32_t* sh = (const int32_t*)shapes; const int32_t* e = (const int32_t*)((const uint8_t*)sh + sh[id * 2 + 2]);
+    int ox = view ? view[1] : 0, oy = view ? view[2] : 0;
+    int x0 = ox + xy[0] + e[2], y0 = oy + xy[1] + e[3], x1 = ox + xy[0] + e[4] + 1, y1 = oy + xy[1] + e[5] + 1;
+    if (now - last > 500) {   // a new dialog
+        fromFlight = now - g_lastFlightTick < 3000;
+        Log("[vr] dialog sprite %d at (%d,%d) view (%d,%d) bounds (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d), %s", id, xy[0], xy[1], ox, oy,
+            e[2], e[3], e[4], e[5], x0, y0, x1, y1, fromFlight ? "over flight: shown on the HUD glass" : "not from flight");
+    }
+    last = now;
+    if (!fromFlight) return;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 640) x1 = 640; if (y1 > 480) y1 = 480;
+    if (x1 - x0 < 16 || y1 - y0 < 16) { x0 = 120; y0 = 120; x1 = 520; y1 = 360; }   // unknown size: the middle of the screen
+    rect[0] = x0; rect[1] = y0; rect[2] = x1; rect[3] = y1;
+    Vr_SetFlightDialog(x0, y0, x1, y1);
+}
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
     Smooth_SetGameThread();
+    NoteDialogDraw((uint32_t)xy[-4], id, shapes, xy, view);
     NotePostHudDraw((uint32_t)xy[-4]);                                         // (game thread: menus and bases too, for the ground cheats)
     if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view);   // also the nav map, opened during flight
     if (GetTickCount() - g_lastFlightTick < 500) return;            // only menus / films / PAD
@@ -2149,7 +2174,7 @@ extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
     lastX[k] = xy[0]; lastY[k] = xy[1];
 }
 static uintptr_t g_spr1Cont = 0x41305a + 6, g_spr2Cont = 0x4144e0 + 6, g_spr3Cont = 0x413e52 + 6, g_spr4Cont = 0x41368d + 6;
-extern "C" void __cdecl SpriteDetect(int id, void* shapes, int* xy, int* view) { NotePostHudDraw((uint32_t)xy[-4]); if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view); }
+extern "C" void __cdecl SpriteDetect(int id, void* shapes, int* xy, int* view) { NotePostHudDraw((uint32_t)xy[-4]); NoteDialogDraw((uint32_t)xy[-4], id, shapes, xy, view); if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view); }
 __declspec(naked) static void HookSprite3() {
     __asm {
         pushad
