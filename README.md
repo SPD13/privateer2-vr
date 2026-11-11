@@ -199,6 +199,29 @@ If something doesn't work or looks wrong, a bug report with a capture of the pro
 
 The zip contains no personal files: only the captured images, the mod's logs and settings, and the system information listed above.
 
+## HUD Positioning
+
+![HUD panels on a sphere around the player](docs/hud-positioning.png)
+
+In the flat game the HUD is drawn over the whole screen. In VR, the corners of that screen would end up at the edges of your view, where they are hard to read. So the mod cuts the HUD into **panels** and places them like cockpit instruments, on an imaginary **sphere centred on your head**:
+
+- **Radius:** every panel is **0.8 m** from your eyes (`PANEL_RADIUS`). That is a comfortable reading distance, and the same for all panels, so your eyes never refocus when they move from one panel to the next.
+- **Azimuth (left / right):** the angle from straight ahead, seen from above. Negative is to the left, positive to the right: the comms window is at −34°, the guns window at +40°.
+- **Elevation (up / down):** the angle from eye level, seen from the side. Positive is above, negative below: the velocity readout is at +24°, the radar at −28°.
+- **Curvature:** each panel is a flat plate turned to **face your head**. Together they follow the curve of the sphere, so every panel is seen straight on, never at a slant, wherever it is.
+- **What stays in front:** whatever is not in a panel stays on the **HUD glass**, a flat plane 1 m ahead (`HUD_DIST`). That's the crosshair, the direction arrows and the messages. Target brackets and the missile lock are not on the glass: they are attached to the target in 3D, at its real distance.
+
+The panels sit around the edges of your view, below and above the gun line. That leaves the centre clear for flying and fighting: a glance, or a small turn of the head, is enough to read them.
+
+Each panel is one line in `p2vr.ini`:
+
+```ini
+PANEL_RADAR=254,338,388,478, 0,-28, 0.30
+;           x0, y0, x1, y1   az, el  width (m) [, radius (m)]
+```
+
+The first four numbers are the rectangle cut from the game's 640×480 HUD. Then come the azimuth and elevation in degrees, and the panel's width in metres; its height follows the rectangle's shape. An optional last number gives that panel its own distance. `PANEL_<NAME>=0` removes a panel, and `HUD_PANELS=0` goes back to one flat HUD. Every panel and its default is listed in [SETTINGS.md](SETTINGS.md#hud-panels).
+
 ## Settings (`p2vr.ini`)
 
 All options of the mod are in **`p2vr.ini`**, in the game folder (the launcher's *Open game folder* button opens it). Edit it with any text editor while the game is closed. Main groups:
@@ -264,6 +287,7 @@ Pushing a tag `vX.Y.Z` builds and publishes a release: the mod archive `privatee
 - [RELEASING.md](RELEASING.md): versioning, release workflow, local builds.
 - `SPIKE_REPORT.md`: the feasibility spike and its go/no-go result.
 - `notes/RE_NOTES.md`: addresses, structures and algorithms found by reverse engineering.
+- `docs/hud-positioning.png`: the HUD positioning diagram, drawn by `scripts/make_hud_diagram.py` from the default panel layout and an in-game HUD capture (`docs/hud-capture.png`). Run it again after changing the panel defaults.
 
 ## Credits and legal
 
