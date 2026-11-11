@@ -101,7 +101,7 @@ struct EyeSet { std::vector<uint8_t> px[2]; VrView views[2]; uint8_t pal[1024]; 
                 bool mHave; uint32_t mSerial; float mPos[MAX_BLOBS][3], mSize[MAX_BLOBS][2]; uint8_t mValid[MAX_BLOBS]; };
 static EyeSet   s_sets[3];
 static int      s_back = 0, s_ready = -1, s_inUse = -1;
-static DWORD    s_lastEyeTick;
+static DWORD    s_lastEyeTick; static int s_traceFrames;   // (diagnostic: frames logged after a flight / flat switch)
 static uint32_t s_eyeCount, s_eyeCountAtScreen; static LARGE_INTEGER s_lastEyeQpc; static bool s_screenFlight;   // see Vr_SetScreenSource
 
 // HUD markers (8-bit) from the game thread
@@ -109,7 +109,7 @@ static std::vector<uint8_t> s_mk; static int s_mkW, s_mkH; static uint8_t s_mkPa
 static VrMarkerBlob s_blobs[MAX_BLOBS], s_shownBlobs[MAX_BLOBS]; static int s_nBlobs, s_nShownBlobs;
 static float s_observerBack = 0;
 static bool  s_retInEyes = true;
-static bool  s_retGlass = true; static float s_glassAlpha = 0.7f;   // crosshair on the HUD glass, semi-transparent     // crosshair/lead indicator are drawn into the eye images (no quad layers)
+static bool  s_retGlass = true; static float s_glassAlpha = 0.9f;   // crosshair on the HUD glass, semi-transparent     // crosshair/lead indicator are drawn into the eye images (no quad layers)
 static uint32_t s_mkSerial, s_shownSerial; static DWORD s_mkSubmitTick;                       // marker image serials (submitted / on screen)
 // exact poses: for the marker set on screen, and for a newly submitted (pending) set
 static float s_mPos[MAX_BLOBS][3], s_mSize[MAX_BLOBS][2]; static uint8_t s_mValid[MAX_BLOBS];
@@ -168,7 +168,7 @@ void Vr_SubmitEyes(const VrView used[2], const uint8_t pal[1024]) {
     s.views[0] = used[0]; s.views[1] = used[1]; memcpy(s.pal, pal, 1024);
     s_ready = s_back;
     for (int i = 0; i < 3; i++) if (i != s_ready && i != s_inUse) { s_back = i; break; }
-    s_lastEyeTick = GetTickCount(); s_eyeCount++; QueryPerformanceCounter(&s_lastEyeQpc);
+    s_lastEyeTick = GetTickCount();
     LeaveCriticalSection(&s_cs);
 }
 void Vr_SetObserverBack(float m) { s_observerBack = m; }
@@ -195,6 +195,17 @@ uint32_t Vr_SubmitMarkers(const uint8_t* idx, int w, int h, const uint8_t pal[10
     LeaveCriticalSection(&s_cs);
     return serial;
 }
+// once per game cycle that rendered the eyes (not the extra smoothing renders in between): screen frames are flight
+// frames only if one of these happened for them
+void Vr_NoteFlightFrame() {
+    EnterCriticalSection(&s_cs); s_eyeCount++; QueryPerformanceCounter(&s_lastEyeQpc); LeaveCriticalSection(&s_cs);
+}
+// the game finished its flight HUD for this cycle (a cycle that leaves for a flat screen presents that screen instead)
+static uint32_t s_hudCount, s_hudCountAtScreen;
+void Vr_NoteHudDone() { EnterCriticalSection(&s_cs); s_hudCount++; LeaveCriticalSection(&s_cs); }
+// a 2D sprite drawn after the flight HUD was finished: a flat screen (nav map...) drawn over the cycle's frame
+static volatile LONG s_flatDraws; static LONG s_flatDrawsAtScreen;
+void Vr_NoteFlatDraw() { InterlockedIncrement(&s_flatDraws); }
 void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     EnterCriticalSection(&s_cs);
     s_screenHandle = h; s_screenW = w; s_screenH = hgt; s_screenFrame = frame;
@@ -203,7 +214,18 @@ void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     // frame instead of up to 300 ms later (the frozen space view with the flat image laid over it as a HUD).
     LARGE_INTEGER now, f; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
     double ms = s_lastEyeQpc.QuadPart ? (now.QuadPart - s_lastEyeQpc.QuadPart) * 1000.0 / f.QuadPart : 1e9;
-    s_screenFlight = s_eyeCount != s_eyeCountAtScreen || ms < 20.0;
+    bool was = s_screenFlight;
+    uint32_t huds = s_hudCount - s_hudCountAtScreen; s_hudCountAtScreen = s_hudCount;
+    LONG flatDraws = s_flatDraws - s_flatDrawsAtScreen; s_flatDrawsAtScreen = s_flatDraws;
+    s_screenFlight = (s_eyeCount != s_eyeCountAtScreen || ms < 20.0) && huds > 0 && flatDraws < 3;
+    {   // diagnostic: how the frames around a change are tagged
+        static int follow; static char prev[2][160];
+        char line[160]; sprintf_s(line, "[vr] screen frame %u tagged %s (eye renders since last frame %u, last %.1f ms ago, HUDs %u, sprites after HUD %ld", frame, s_screenFlight ? "flight" : "flat",
+                                  s_eyeCount - s_eyeCountAtScreen, ms, huds, flatDraws);
+        if (was != s_screenFlight) { follow = 4; for (int k = 0; k < 2; k++) if (prev[k][0]) Log("%s, before)", prev[k]); }
+        if (follow > 0) { follow--; Log("%s, %s)", line, follow == 3 ? "CHANGE" : "after"); }
+        strcpy_s(prev[0], prev[1]); strcpy_s(prev[1], line);
+    }
     s_eyeCountAtScreen = s_eyeCount;
     LeaveCriticalSection(&s_cs);
 }
@@ -423,6 +445,9 @@ static void CreateActions() {
 
 // ---------------------------------------------------------------- menu pointer (outside flight)
 static Swap beamSc; static bool beamReady;
+// fade through black between the flight view and a flat screen (TRANSITION_FADE): the old view fades out, the switch
+// happens under full black, the new view fades in
+static Swap fadeSc; static bool fadeReady; static float s_fadeMs = 500.0f; static const int FADE_STEPS = 32;
 static HWND GameWnd();
 // Message panel shown instead of the (frozen) game while a desktop tool of the game is open (p2den's Alt+J joystick setup)
 static Swap msgSc[2]; static bool msgReady[2]; static const int MSG_W = 1280, MSG_H = 200;
@@ -744,6 +769,20 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
             beamReady = true;
         }
     }                        // [ markers | lead indicator | cached octagon ], 2x
+    if (s_fadeMs > 0 && MakeSwap(fadeSc, FADE_STEPS * 4, 4)) {   // FADE_STEPS cells of premultiplied black, alpha 0..1
+        std::vector<uint8_t> px((size_t)FADE_STEPS * 4 * 4 * 4, 0);
+        for (int y = 0; y < 4; y++) for (int x = 0; x < FADE_STEPS * 4; x++) px[((size_t)y * FADE_STEPS * 4 + x) * 4 + 3] = (uint8_t)((x / 4) * 255 / (FADE_STEPS - 1));
+        uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrResult r = xrAcquireSwapchainImage(fadeSc.sc, &ai, &i);
+        if (XR_SUCCEEDED(r)) {
+            XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; wi.timeout = XR_INFINITE_DURATION; xrWaitSwapchainImage(fadeSc.sc, &wi);
+            ID3D11Resource* res = nullptr; fadeSc.rtv[i]->GetResource(&res);
+            if (res) { ctx->UpdateSubresource(res, 0, nullptr, px.data(), FADE_STEPS * 4 * 4, 0); res->Release(); }
+            XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO}; xrReleaseSwapchainImage(fadeSc.sc, &ri);
+            fadeReady = true;
+        }
+        Log("[vr] transition fade %s (%.0f ms)", fadeReady ? "ready" : "FAILED", s_fadeMs);
+    }
     EnterCriticalSection(&s_cs);
     s_target.width = w; s_target.height = h; s_target.tanHalfH = tH; s_target.tanHalfV = tV; s_targetValid = true;
     LeaveCriticalSection(&s_cs);
@@ -1030,7 +1069,23 @@ static void FrameLoop() {
         EnterCriticalSection(&s_cs); bool screenFlight = s_screenFlight; LeaveCriticalSection(&s_cs);
         bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300 && screenFlight;
         {   static bool lastF; static DWORD lastSwitch; if (flight != lastF) { lastF = flight;
-                Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); (void)lastSwitch; } }
+                Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); (void)lastSwitch;
+                s_traceFrames = 15; } }
+        // Fade through black: while the shown mode differs from the game's, the old view stays (its last images,
+        // not updated) under a darkening veil; at full black the shown mode switches, and the new view fades in.
+        static bool shownFlight; static float fadeA; static LARGE_INTEGER fadePrev;
+        float fadeDt; { LARGE_INTEGER n, f; QueryPerformanceCounter(&n); QueryPerformanceFrequency(&f);
+            fadeDt = fadePrev.QuadPart ? (float)((n.QuadPart - fadePrev.QuadPart) * 1000.0 / f.QuadPart) : 0.f; fadePrev = n;
+            if (fadeDt > 50.f) fadeDt = 50.f; }
+        if (!fadeReady || !targetDone) { shownFlight = flight; fadeA = 0; }
+        else if (shownFlight != flight) {                                   // fading out: 40% of the time
+            fadeA += fadeDt / (s_fadeMs * 0.4f);
+            if (fadeA >= 1.f) { fadeA = 1.f; shownFlight = flight; }
+        } else if (fadeA > 0) {                                             // fading in: 60%
+            fadeA -= fadeDt / (s_fadeMs * 0.6f); if (fadeA < 0) fadeA = 0;
+        }
+        bool fadeHold = shownFlight != flight;                              // keep showing the old view's last images
+        flight = shownFlight;
         if (s_retDist > 0) {
             float want = s_retWanted > 0 ? s_retWanted : s_retDist;
             if (want > s_retDist) want = s_retDist; if (want < s_retMin) want = s_retMin;
@@ -1050,8 +1105,10 @@ static void FrameLoop() {
         else s_ptrHit = false;
         XrCompositionLayerQuad marks[MAX_BLOBS]; XrCompositionLayerQuad pq[MAX_PANELS];
         if (fs.shouldRender && targetDone) {
-            if (flight) { UploadEyes(); UpdateMarkers(); }
-            UpdateScreen(flight);
+            if (!fadeHold) {
+                if (flight) { UploadEyes(); UpdateMarkers(); }
+                UpdateScreen(flight);
+            }
             if (flight && haveEyeImage) {
                 for (int e = 0; e < 2; e++) {
                     pv[e].pose.position = {shownViews[e].pos[0], shownViews[e].pos[1], shownViews[e].pos[2]};
@@ -1073,7 +1130,7 @@ static void FrameLoop() {
                     float inf = s_retDist > 0 ? s_retDist : 500.0f;
                     int shownPanels = 0; uint32_t pmask = (uint32_t)s_panelMask;
                     if (s_panelsOn) for (int k = 0; k < s_nPanels; k++) shownPanels += (pmask >> k) & 1;
-                    int budget = s_maxLayers - 3 - shownPanels;   // projection, HUD, crosshair, panels in use
+                    int budget = s_maxLayers - 3 - shownPanels - (fadeReady ? 1 : 0);   // projection, HUD, crosshair, panels in use, fade
                     for (int b = 0; b < s_nShownBlobs; b++) {
                         if ((int)layers.size() - 1 >= budget) break;
                         const VrMarkerBlob& bl = s_shownBlobs[b];
@@ -1110,7 +1167,9 @@ static void FrameLoop() {
                     }
                 }
             }
-            if (haveScreen) {
+            // fading out of flight: the HUD image may already be the first flat frame (taken for a flight frame, as
+            // the eyes kept rendering), which would show the map on the HUD glass, close: only space fades out
+            if (haveScreen && !(flight && fadeHold)) {
                 quad.space = localSpace; quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                 quad.subImage.swapchain = quadSc.sc; quad.subImage.imageRect = {{0, 0}, {HUD_PX_W, HUD_PX_H}};
                 float wdt = flight ? s_hudWidth : s_screenWidth;
@@ -1175,10 +1234,33 @@ static void FrameLoop() {
             msg.size = {1.3f, 1.3f * MSG_H / MSG_W}; msg.pose = {{0, 0, 0, 1}, {0, 0, -1.5f}};
             layers.push_back((XrCompositionLayerBaseHeader*)&msg);
         }
+        XrCompositionLayerQuad fade = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+        if (fadeA > 0 && fadeReady && fs.shouldRender && !layers.empty() && !(msgSlot >= 0 && msgReady[msgSlot])) {
+            float a = fadeA * fadeA * (3 - 2 * fadeA);                      // smoothstep
+            int step = (int)(a * (FADE_STEPS - 1) + 0.5f);                  // the cell of that darkness (centre 2x2 texels)
+            fade.space = viewSpace; fade.eyeVisibility = XR_EYE_VISIBILITY_BOTH;   // head-locked, covers the whole view
+            fade.subImage.swapchain = fadeSc.sc; fade.subImage.imageRect = {{step * 4 + 1, 1}, {2, 2}};
+            fade.size = {4.0f, 4.0f}; fade.pose = {{0, 0, 0, 1}, {0, 0, -0.5f}};
+            fade.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            layers.push_back((XrCompositionLayerBaseHeader*)&fade);
+            static int logged; if (logged < 3) { logged++; Log("[vr] transition fade layer submitted (alpha %.2f)", a); }
+        }
         XrFrameEndInfo fei = {XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime; fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         fei.layerCount = (uint32_t)layers.size(); fei.layers = layers.data();
         xrEndFrame(sess, &fei);
+        {   // diagnostic: headset frame timing, in detail for the frames after a flight / flat switch
+            static LARGE_INTEGER prev, f; LARGE_INTEGER now; QueryPerformanceCounter(&now); if (!f.QuadPart) QueryPerformanceFrequency(&f);
+            double ms = prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0; prev = now;
+            if (s_traceFrames > 0) {
+                s_traceFrames--;
+                Log("[vr] after switch: frame %.1f ms, %u layers, flight %d, eyes %d, screen %d, render %d, screen frame %u, fade %.2f hold %d",
+                    ms, fei.layerCount, flight, haveEyeImage, haveScreen, fs.shouldRender, shownScreenFrame, fadeA, fadeHold);
+                if (s_traceFrames == 0 && fadeA > 0) s_traceFrames = 1;   // follow the fade to its end
+            } else if (ms > 25.0) {
+                static DWORD lastSlow; if (GetTickCount() - lastSlow > 500) { lastSlow = GetTickCount(); Log("[vr] slow frame: %.1f ms (flight %d)", ms, flight); }
+            }
+        }
     }
 }
 
@@ -1208,9 +1290,11 @@ void Vr_Start(const char* ini, LogFn log) {
     s_hudDist = IniF(ini, "HUD_DIST", 1.0f); s_hudWidth = IniF(ini, "HUD_WIDTH", 0.0f); s_hudY = IniF(ini, "HUD_Y", 0.0f);
     if (s_hudWidth <= 0) s_hudWidth = 2 * s_hudDist * GAME_TAN_H;   // auto: exactly the game's field of view
     s_retInEyes = IniF(ini, "RETICLE_IN_EYES", 1.0f) != 0;
-    s_retGlass = IniF(ini, "RETICLE_GLASS", 1.0f) != 0; s_glassAlpha = IniF(ini, "RETICLE_GLASS_ALPHA", 0.7f);
+    s_retGlass = IniF(ini, "RETICLE_GLASS", 1.0f) != 0; s_glassAlpha = IniF(ini, "RETICLE_GLASS_ALPHA", 0.9f);
     s_retDist = IniF(ini, "RETICLE_DIST", 30.0f); s_retMin = IniF(ini, "RETICLE_MIN_DIST", 1.5f); s_retNow = s_retDist; s_retFrac = IniF(ini, "RETICLE_SIZE", 0.20f);
     s_screenDist = IniF(ini, "SCREEN_DIST", 2.5f); s_screenWidth = IniF(ini, "SCREEN_WIDTH", 3.2f);
+    s_fadeMs = IniF(ini, "TRANSITION_FADE", 1.0f) != 0 ? IniF(ini, "TRANSITION_FADE_MS", 500.0f) : 0.0f;
+    if (s_fadeMs > 0 && s_fadeMs < 50) s_fadeMs = 50; if (s_fadeMs > 2000) s_fadeMs = 2000;
     s_keyGain = IniF(ini, "HUD_KEY_GAIN", 40.0f); s_keyThresh = IniF(ini, "HUD_KEY_THRESHOLD", 0.03f);
     // HUD panels on a sphere around the seated head. PANEL_<NAME> = x0,y0,x1,y1 (HUD pixels, 640x480), azimuth (deg, + right),
     // elevation (deg, + up), width (m) [, radius (m)]. Each panel faces the centre of the sphere.

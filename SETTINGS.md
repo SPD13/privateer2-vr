@@ -46,7 +46,7 @@ The game's 2D HUD (radar, gauges, VDUs) is shown on a flat panel in front of you
 | Setting | Default | Effect |
 |---|---|---|
 | `RETICLE_GLASS` | `1` | Draw the gun crosshair on the HUD glass (the HUD panel plane) with `RETICLE_GLASS_ALPHA` opacity. Takes precedence over `RETICLE_IN_EYES`. |
-| `RETICLE_GLASS_ALPHA` | `0.7` | Crosshair opacity on the glass (0..1). |
+| `RETICLE_GLASS_ALPHA` | `0.9` | Crosshair opacity on the glass (0..1). |
 | `HUD_ARROW_LAYER` | `1` | The yellow target-direction arrow (the triangle the HUD draws around the crosshair, pointing to the target) is not drawn into the HUD image but redrawn by p2vr as its own layer on the HUD glass, together with the other direction arrows. It is never cut by the HUD panels (`HUD_PANELS`) or the screen edge and passes behind the panels. It follows one game frame (1/30 s) later than the HUD. `0` = leave it in the HUD image. |
 | `RETICLE_IN_EYES` | `1` | Used when `RETICLE_GLASS=0`. `1` = draw the crosshair into the 3D image at infinity, so nearer ships cover it. `0` = separate layer on top. |
 | `RETICLE_DIST` | `30` | Crosshair distance on the ship's boresight when it is not on the glass. `500` ≈ optical infinity, like a real HUD. `0` = keep it in the HUD panel. The template uses `500`. |
@@ -126,6 +126,8 @@ Outside flight, the game screen is shown on a virtual screen. The right controll
 |---|---|---|
 | `SCREEN_DIST` | `2.5` | Distance of the virtual screen. |
 | `SCREEN_WIDTH` | `3.2` | Width of the virtual screen. |
+| `TRANSITION_FADE` | `1` | Fade through black when the view switches between flight and a flat screen (nav map, menus, landing), so the eyes refocus in the dark. `0` = instant switch. |
+| `TRANSITION_FADE_MS` | `500` | Length of the whole fade in milliseconds (40% fading out, 60% fading in; 50 to 2000). |
 | `CURSOR_FIX` | `1` | Screens that draw the mouse cursor offset from the mouse position, such as the PAD (by its screen origin, 60,23) and the nav map: the VR pointer moves the mouse so that the drawn cursor lands exactly where the beam points. The drawn cursor is what the game uses for clicks. The offset is detected automatically from where the game draws its cursor. `0` = the mouse goes exactly to the beam point (the cursor then shows offset). |
 
 ## VR controllers

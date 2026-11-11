@@ -24,6 +24,9 @@ void Vr_SubmitEyes(const VrView used[2], const uint8_t paletteRGBX[1024]);
 // (1 = covered by a ship), and the crosshair rectangle in game pixels (640x480).
 void Vr_SetEyeCrosshair(int eye, const float rows[9], int bx0, int by0, int bx1, int by1, const uint8_t* occ,
                         float gx0, float gy0, float gx1, float gy1);
+void Vr_NoteFlightFrame();
+void Vr_NoteFlatDraw();     // a 2D sprite drawn after the flight HUD (a flat screen being drawn)
+void Vr_NoteHudDone();      // the game drew its flight HUD this cycle   // a game cycle rendered the eyes (tags the next screen frame as flight)
 void Vr_SetScreenSource(HANDLE sharedTex, int w, int h, uint32_t frameNo);  // from the p2den Present hook
 void Vr_RequestRecenter();
 

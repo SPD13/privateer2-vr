@@ -686,6 +686,7 @@ static void PanelLayout() {
 static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H);
 extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle is idle (smoothing may render)
     g_frameDone = true;
+    Vr_NoteHudDone();
     PanelLayout();
     if (g_lastCol) {   // flight: the cheat message into the game's frame after its HUD (p2den's flight upload is not hooked)
         br_pixelmap* gc = (br_pixelmap*)g_lastCol;
@@ -1452,6 +1453,7 @@ static void RenderVrEyes() {
     br_pixelmap* gc = (br_pixelmap*)g_lastCol;
     TakeSnapshot();
     RenderVrCore();
+    Vr_NoteFlightFrame();
     {   // closest surface in the HUD's view (also used for the optional dynamic crosshair depth)
         float z = HudFovDepth();
         if (g_retDynamic) Vr_SetReticleDistance(z > 0 ? z / g_worldScale * 0.95f : -1.0f);
@@ -1624,8 +1626,9 @@ static void CheatMessage(const char* fmt, ...) {
 // drawn into p2den's 8-bit frame upload (Capture overlay callback): 640x480, or its window-size 2D layer where the game's
 // 4:3 picture is centred and scaled
 static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
-    if (!g_cheatMsg[0] || (int)(GetTickCount() - g_cheatMsgUntil) > 0 || !data) return;
-    {   static DWORD lastLog; if (GetTickCount() - lastLog > 2000) { lastLog = GetTickCount(); Log("[cheat] message drawn into a %dx%d frame (pitch %d): %s", W, H, pitch, g_cheatMsg); } }
+    if (!data) return;
+    bool showing = g_cheatMsg[0] && (int)(GetTickCount() - g_cheatMsgUntil) <= 0;
+    if (showing) {   static DWORD lastLog; if (GetTickCount() - lastLog > 2000) { lastLog = GetTickCount(); Log("[cheat] message drawn into a %dx%d frame (pitch %d): %s", W, H, pitch, g_cheatMsg); } }
     static int msgSerial; static char drawn[96];
     if (strcmp(drawn, g_cheatMsg) || g_cheatMaskFor < 0) {   // text -> 640 x 22 mask, through GDI
         strcpy_s(drawn, g_cheatMsg); g_cheatMaskFor = ++msgSerial;
@@ -1651,7 +1654,31 @@ static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
     // the colour that shows red: in flight p2den displays the HUD layer with red and blue swapped against the palette
     // (UpdateHudSwapLut); the ground screens (menus, bases, PAD) use the palette as it is
     bool flight = GetTickCount() - g_lastFlightTick < 500;
-    uint8_t pal[1024]; GetPalRGBX(pal); int red = 1, best = 1 << 30, ri = flight ? 2 : 0, bi = flight ? 0 : 2;
+    uint8_t pal[1024]; GetPalRGBX(pal);
+    // Whether p2den shows this screen's palette as it is or with red and blue swapped differs between screens: measured by
+    // comparing the frame's indices with what p2den displays (its 640x480 colour readback, refreshed every second).
+    static int swapped = -1; static DWORD lastCheck;
+    if (flight) swapped = 1;
+    else if (W == 640 && H == 480 && GetTickCount() - lastCheck > 500) {
+        lastCheck = GetTickCount();
+        static std::vector<uint8_t> rgb(640 * 480 * 3);
+        if (Capture_GetHudRGB(rgb.data())) {
+            long long errN = 0, errS = 0; int n = 0;
+            for (int y = 0; y < 480; y += 4) {
+                if (y >= CHEAT_MSG_Y - 4 && y < CHEAT_MSG_Y + CHEAT_MSG_H + 4) continue;   // (our own message area)
+                for (int x = 0; x < 640; x += 4) {
+                    int c = data[(size_t)y * pitch + x]; const uint8_t* q = &pal[c * 4]; const uint8_t* v = &rgb[(y * 640 + x) * 3];
+                    if (abs(q[0] - q[2]) < 48) continue;                                // only colours where it matters
+                    errN += abs(q[0] - v[0]) + abs(q[2] - v[2]); errS += abs(q[2] - v[0]) + abs(q[0] - v[2]); n++;
+                }
+            }
+            int was = swapped;
+            if (n > 50) { if (errS * 10 < errN * 7) swapped = 1; else if (errN * 10 < errS * 7) swapped = 0; }
+            if (swapped != was) Log("[cheat] this screen shows the palette %s (%d samples)", swapped ? "with red and blue swapped" : "as it is", n);
+        }
+    }
+    if (!showing) return;                                  // (the palette check above runs on every frame)
+    int red = 1, best = 1 << 30, ri = swapped == 1 ? 2 : 0, bi = swapped == 1 ? 0 : 2;
     // the most vivid bright red the palette has (each screen has its own palette; a plain "closest to red" can be dull)
     best = -(1 << 30);
     for (int c = 1; c < 256; c++) { int R = pal[c*4+ri], G = pal[c*4+1], B = pal[c*4+bi], s = 2 * R - G - B + R / 2 - 3 * abs(G - B) / 2; if (s > best) { best = s; red = c; } }
@@ -2094,8 +2121,18 @@ static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
         Log("[cursor] drawn from %08x, view at (%d,%d), %d,%d from the mouse: VR pointer offset (%d,%d)", ret, view[1], view[2], dx, dy, ox, oy);
     }
 }
+// Nav map sprites drawn after the flight HUD was finished: the nav map opened during flight presents its first frame
+// from the cycle that rendered the 3D view, so that frame must go to the flat screen, not the HUD. Only the nav map's
+// own call sites (0x45a000..0x45c000) count: the flight HUD itself draws sprites late too (0x44c265).
+static void NotePostHudDraw(uint32_t ret) {
+    if (!g_frameDone || g_inEye2 || GetTickCount() - g_lastFlightTick > 1000) return;
+    if (ret < 0x45a000 || ret >= 0x45c000) return;
+    Vr_NoteFlatDraw();
+    static int logged; if (logged < 6) { logged++; Log("[vr] sprite drawn after the flight HUD (call site %08x)", ret); }
+}
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
-    Smooth_SetGameThread();                                         // (game thread: menus and bases too, for the ground cheats)
+    Smooth_SetGameThread();
+    NotePostHudDraw((uint32_t)xy[-4]);                                         // (game thread: menus and bases too, for the ground cheats)
     if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view);   // also the nav map, opened during flight
     if (GetTickCount() - g_lastFlightTick < 500) return;            // only menus / films / PAD
     if (g_cursorId >= 0 && id == g_cursorId && (!g_cursorShapes || shapes == g_cursorShapes)) { xy[0] += g_cursorDx; xy[1] += g_cursorDy; }
@@ -2112,7 +2149,7 @@ extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
     lastX[k] = xy[0]; lastY[k] = xy[1];
 }
 static uintptr_t g_spr1Cont = 0x41305a + 6, g_spr2Cont = 0x4144e0 + 6, g_spr3Cont = 0x413e52 + 6, g_spr4Cont = 0x41368d + 6;
-extern "C" void __cdecl SpriteDetect(int id, void* shapes, int* xy, int* view) { if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view); }
+extern "C" void __cdecl SpriteDetect(int id, void* shapes, int* xy, int* view) { NotePostHudDraw((uint32_t)xy[-4]); if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view); }
 __declspec(naked) static void HookSprite3() {
     __asm {
         pushad
