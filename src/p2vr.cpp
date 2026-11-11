@@ -2128,7 +2128,6 @@ static void NotePostHudDraw(uint32_t ret) {
     if (!g_frameDone || g_inEye2 || GetTickCount() - g_lastFlightTick > 1000) return;
     if (ret < 0x45a000 || ret >= 0x45c000) return;
     Vr_NoteFlatDraw();
-    static int logged; if (logged < 6) { logged++; Log("[vr] sprite drawn after the flight HUD (call site %08x)", ret); }
 }
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
     Smooth_SetGameThread();

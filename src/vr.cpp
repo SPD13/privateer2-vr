@@ -101,7 +101,7 @@ struct EyeSet { std::vector<uint8_t> px[2]; VrView views[2]; uint8_t pal[1024]; 
                 bool mHave; uint32_t mSerial; float mPos[MAX_BLOBS][3], mSize[MAX_BLOBS][2]; uint8_t mValid[MAX_BLOBS]; };
 static EyeSet   s_sets[3];
 static int      s_back = 0, s_ready = -1, s_inUse = -1;
-static DWORD    s_lastEyeTick; static int s_traceFrames;   // (diagnostic: frames logged after a flight / flat switch)
+static DWORD    s_lastEyeTick;
 static uint32_t s_eyeCount, s_eyeCountAtScreen; static LARGE_INTEGER s_lastEyeQpc; static bool s_screenFlight;   // see Vr_SetScreenSource
 
 // HUD markers (8-bit) from the game thread
@@ -214,18 +214,9 @@ void Vr_SetScreenSource(HANDLE h, int w, int hgt, uint32_t frame) {
     // frame instead of up to 300 ms later (the frozen space view with the flat image laid over it as a HUD).
     LARGE_INTEGER now, f; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
     double ms = s_lastEyeQpc.QuadPart ? (now.QuadPart - s_lastEyeQpc.QuadPart) * 1000.0 / f.QuadPart : 1e9;
-    bool was = s_screenFlight;
     uint32_t huds = s_hudCount - s_hudCountAtScreen; s_hudCountAtScreen = s_hudCount;
     LONG flatDraws = s_flatDraws - s_flatDrawsAtScreen; s_flatDrawsAtScreen = s_flatDraws;
     s_screenFlight = (s_eyeCount != s_eyeCountAtScreen || ms < 20.0) && huds > 0 && flatDraws < 3;
-    {   // diagnostic: how the frames around a change are tagged
-        static int follow; static char prev[2][160];
-        char line[160]; sprintf_s(line, "[vr] screen frame %u tagged %s (eye renders since last frame %u, last %.1f ms ago, HUDs %u, sprites after HUD %ld", frame, s_screenFlight ? "flight" : "flat",
-                                  s_eyeCount - s_eyeCountAtScreen, ms, huds, flatDraws);
-        if (was != s_screenFlight) { follow = 4; for (int k = 0; k < 2; k++) if (prev[k][0]) Log("%s, before)", prev[k]); }
-        if (follow > 0) { follow--; Log("%s, %s)", line, follow == 3 ? "CHANGE" : "after"); }
-        strcpy_s(prev[0], prev[1]); strcpy_s(prev[1], line);
-    }
     s_eyeCountAtScreen = s_eyeCount;
     LeaveCriticalSection(&s_cs);
 }
@@ -1068,9 +1059,8 @@ static void FrameLoop() {
 
         EnterCriticalSection(&s_cs); bool screenFlight = s_screenFlight; LeaveCriticalSection(&s_cs);
         bool flight = targetDone && (GetTickCount() - s_lastEyeTick) < 300 && screenFlight;
-        {   static bool lastF; static DWORD lastSwitch; if (flight != lastF) { lastF = flight;
-                Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); (void)lastSwitch;
-                s_traceFrames = 15; } }
+        {   static bool lastF; if (flight != lastF) { lastF = flight;
+                Log("[vr] %s (screen frame tagged %s)", flight ? "flight view" : "flat screen", screenFlight ? "flight" : "flat"); } }
         // Fade through black: while the shown mode differs from the game's, the old view stays (its last images,
         // not updated) under a darkening veil; at full black the shown mode switches, and the new view fades in.
         static bool shownFlight; static float fadeA; static LARGE_INTEGER fadePrev;
@@ -1243,24 +1233,11 @@ static void FrameLoop() {
             fade.size = {4.0f, 4.0f}; fade.pose = {{0, 0, 0, 1}, {0, 0, -0.5f}};
             fade.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
             layers.push_back((XrCompositionLayerBaseHeader*)&fade);
-            static int logged; if (logged < 3) { logged++; Log("[vr] transition fade layer submitted (alpha %.2f)", a); }
         }
         XrFrameEndInfo fei = {XR_TYPE_FRAME_END_INFO};
         fei.displayTime = fs.predictedDisplayTime; fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         fei.layerCount = (uint32_t)layers.size(); fei.layers = layers.data();
         xrEndFrame(sess, &fei);
-        {   // diagnostic: headset frame timing, in detail for the frames after a flight / flat switch
-            static LARGE_INTEGER prev, f; LARGE_INTEGER now; QueryPerformanceCounter(&now); if (!f.QuadPart) QueryPerformanceFrequency(&f);
-            double ms = prev.QuadPart ? (now.QuadPart - prev.QuadPart) * 1000.0 / f.QuadPart : 0; prev = now;
-            if (s_traceFrames > 0) {
-                s_traceFrames--;
-                Log("[vr] after switch: frame %.1f ms, %u layers, flight %d, eyes %d, screen %d, render %d, screen frame %u, fade %.2f hold %d",
-                    ms, fei.layerCount, flight, haveEyeImage, haveScreen, fs.shouldRender, shownScreenFrame, fadeA, fadeHold);
-                if (s_traceFrames == 0 && fadeA > 0) s_traceFrames = 1;   // follow the fade to its end
-            } else if (ms > 25.0) {
-                static DWORD lastSlow; if (GetTickCount() - lastSlow > 500) { lastSlow = GetTickCount(); Log("[vr] slow frame: %.1f ms (flight %d)", ms, flight); }
-            }
-        }
     }
 }
 
