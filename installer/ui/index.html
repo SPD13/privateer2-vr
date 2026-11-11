@@ -86,6 +86,14 @@ ul.tips li { margin: 3px 0; }
 footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 0 20px 20px; }
 footer button.link { font-size: 12.5px; }
 footer .help-link { font-size: 14px; color: var(--text); margin-bottom: 10px; }
+.reports { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
+.session h3 { margin: 0 0 6px; font-size: 13.5px; color: var(--muted); font-weight: 600; }
+.caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.cap { background: var(--input-bg); border: 2px solid var(--card-edge); border-radius: 10px; padding: 6px; cursor: pointer; text-align: left; font: inherit; color: var(--text); }
+.cap.selected { border-color: var(--accent); }
+.cap img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 6px; background: #000; display: block; }
+.cap .t { font-weight: 600; font-size: 13px; margin-top: 5px; }
+.cap .s { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
 footer .help-link button.link { font-size: 14px; color: var(--cyan); }
 footer button.github { display: inline-flex; align-items: center; gap: 6px; color: var(--text); text-decoration: none; }
 footer button.github:hover { text-decoration: underline; }
@@ -156,9 +164,22 @@ footer button.github:hover { text-decoration: underline; }
          </div>
       </div>
    </section>
+   <section class="card" id="reportCard">
+      <h2>Report a bug</h2>
+      <div class="small muted">When something goes wrong in the game, press <b>Ctrl+F9</b> while it is on screen: the mod saves a capture
+         (both eye images, the HUD, the game state and the log). Pick it below, save the bug report zip, and attach it to a GitHub issue
+         with a short description of what happened.</div>
+      <div class="reports" id="reports"></div>
+      <div class="actions" style="margin-top:12px">
+         <button id="saveZip" disabled>Save bug report (.zip)</button>
+         <button class="secondary" id="openIssue">Open a GitHub issue</button>
+         <button class="link" id="refreshReports">Refresh</button>
+      </div>
+      <div class="msg info" id="zipDone" hidden></div>
+   </section>
 </main>
 <footer>
-   <div class="help-link">Need help? <button class="link" id="readme">See the GitHub README</button></div>
+   <div class="help-link">Need help? <button class="link" id="readme">See the GitHub README</button> · <button class="link" id="report">Report a bug</button></div>
    <div>Privateer 2 VR launcher &amp; installer <span id="ver"></span> · <button class="link" id="log">Installer log</button></div>
    <div style="margin-top:6px"><button class="link github" id="repo" title="Source code, releases and issues on GitHub"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> github.com/SPD13/privateer2-vr</button></div>
    <div id="newInstaller" hidden style="margin-top:6px">A newer installer is available: <button class="link" id="getInstaller">download it from the releases page</button></div>
@@ -176,8 +197,10 @@ async function api(path, body) {
 function esc(s) { return (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]); }
 function mb(n) { return n ? (n / 1e6).toFixed(1) + ' MB' : ''; }
 
+let reportsFor = null;
 function render(s) {
    state = s;
+   if (s.game && s.game.valid && s.game.path !== reportsFor) { reportsFor = s.game.path; loadReports(); }
    const g = s.game, L = s.latest, job = s.job;
    const running = job && job.running;
    $('ver').textContent = s.version + (s.admin ? ' (administrator)' : '');
@@ -275,7 +298,45 @@ $('repo').onclick = () => api('open', { url: state ? state.repoURL : '' });
 $('readme').onclick = () => api('open', { url: state ? state.repoURL + '#readme' : '' });
 $('getInstaller').onclick = () => api('open', { url: state ? state.repoURL + '/releases/latest' : '' });
 $('log').onclick = () => api('log');
-window.addEventListener('focus', () => { if (state && !(state.job && state.job.running)) api('rescan'); });
+
+// ---- bug reports
+let picked = null, lastZip = null;
+async function loadReports() {
+   const r = await fetch('/api/reports', { headers: { 'X-Token': token }, cache: 'no-store' });
+   const sessions = r.ok ? await r.json() : [];
+   const box = $('reports'), prev = picked;
+   picked = null; $('saveZip').disabled = true;
+   if (!sessions || !sessions.length) {
+      box.innerHTML = '<div class="msg warn">No captures yet. In the game, press <b>Ctrl+F9</b> when the problem is on screen, then come back here.</div>';
+      return;
+   }
+   box.innerHTML = sessions.map(s => `<div class="session"><h3>Session ${esc(s.name.replace('_', ' ').replace(/-(\d\d)-(\d\d)$/, ':$1:$2'))}</h3><div class="caps">` +
+      s.captures.map(c => `<button class="cap" data-s="${esc(s.name)}" data-c="${esc(c.name)}">` +
+         (c.thumb ? `<img loading="lazy" src="/api/report-file?t=${token}&s=${encodeURIComponent(s.name)}&c=${encodeURIComponent(c.name)}&f=${encodeURIComponent(c.thumb)}">` : '<img>') +
+         `<div class="t">${esc(c.name)}</div><div class="s">${(c.summary || []).map(esc).join('<br>')}<br>${c.files} files, ${mb(c.size)}</div></button>`).join('') +
+      '</div></div>').join('');
+   box.querySelectorAll('.cap').forEach(b => b.onclick = () => {
+      box.querySelectorAll('.cap').forEach(x => x.classList.remove('selected'));
+      b.classList.add('selected'); picked = { session: b.dataset.s, capture: b.dataset.c }; $('saveZip').disabled = false;
+   });
+   if (prev) box.querySelectorAll('.cap').forEach(b => { if (b.dataset.s === prev.session && b.dataset.c === prev.capture) b.click(); });
+}
+$('report').onclick = () => { loadReports(); $('reportCard').scrollIntoView({ behavior: 'smooth' }); };
+$('refreshReports').onclick = loadReports;
+$('saveZip').onclick = async () => {
+   if (!picked) return;
+   $('saveZip').disabled = true; $('zipDone').hidden = false; $('zipDone').innerHTML = '<span class="spinner"></span> Making the zip…';
+   const r = await fetch('/api/report-zip', { method: 'POST', headers: { 'X-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify(picked) });
+   $('saveZip').disabled = false;
+   if (!r.ok) { $('zipDone').innerHTML = `<span style="color:var(--fail)">${esc(await r.text())}</span>`; return; }
+   const z = await r.json(); lastZip = z.path;
+   $('zipDone').innerHTML = `Saved <b>${esc(z.path)}</b> (${mb(z.size)}). <button class="link" id="reveal">Show in folder</button><br>` +
+      `Now open a GitHub issue, describe what happened, and drag this zip into the issue.` +
+      (z.tooBig ? `<br><span style="color:var(--wait)">It is larger than GitHub's 25 MB limit: share it through a file sharing service and paste the link in the issue instead.</span>` : '');
+   $('reveal').onclick = () => api('report-reveal', { path: lastZip });
+};
+$('openIssue').onclick = () => api('open', { url: state ? state.repoURL + '/issues/new?template=bug_report.md' : '' });
+window.addEventListener('focus', () => { if (state && !(state.job && state.job.running)) { api('rescan'); if (reportsFor) loadReports(); } });
 poll();
 </script>
 </body>

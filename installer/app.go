@@ -772,6 +772,63 @@ func (a *app) routes(mux *http.ServeMux) {
 		openBrowser(body.URL)
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// bug reports: the captures of recent sessions, their preview images, and the zip
+	handle("/api/reports", "GET", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		dir := a.state.Game.Path
+		a.mu.Unlock()
+		data, _ := json.Marshal(listReports(dir))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(data)
+	})
+	mux.HandleFunc("/api/report-file", func(w http.ResponseWriter, r *http.Request) { // <img> cannot send a header: token in the URL
+		q := r.URL.Query()
+		if r.Method != "GET" || q.Get("t") != a.token || !safeName.MatchString(q.Get("f")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		a.mu.Lock()
+		game := a.state.Game.Path
+		a.mu.Unlock()
+		dir, err := captureDir(game, q.Get("s"), q.Get("c"))
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeFile(w, r, filepath.Join(dir, q.Get("f")))
+	})
+	handle("/api/report-zip", "POST", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Session string `json:"session"`
+			Capture string `json:"capture"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&b) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		a.mu.Lock()
+		game := a.state.Game
+		a.mu.Unlock()
+		path, size, err := makeReportZip(game, b.Session, b.Capture)
+		if err != nil {
+			http.Error(w, "The zip could not be made: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		data, _ := json.Marshal(map[string]any{"path": path, "size": size, "tooBig": size > githubIssueLimit})
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+	})
+	handle("/api/report-reveal", "POST", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Path string `json:"path"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&b) == nil && strings.HasPrefix(filepath.Base(b.Path), "P2VR-bug-report_") && strings.HasSuffix(b.Path, ".zip") {
+			revealFile(b.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 	handle("/api/log", "POST", func(w http.ResponseWriter, r *http.Request) {
 		openFolder(filepath.Dir(logPath))
 		w.WriteHeader(http.StatusNoContent)

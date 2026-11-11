@@ -165,13 +165,13 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             return 1;   // swallow the hotkey
         }
         // (an Esc of the replay itself can come back without the injected flag, re-sent by another input layer: ignored)
-        if (s_replaying && !injected && !up && k->vkCode == VK_ESCAPE && GetTickCount() - s_macroEscTick > 600) { Macro_Abort("Esc pressed"); return 1; }
+        if (s_replaying && !injected && !up && k->vkCode == VK_ESCAPE && GetTickCount() - s_macroEscTick > 4000) { Macro_Abort("Esc pressed"); return 1; }
         // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
         if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
             return 1;
         }
-        if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '7') {   // cheat hotkeys Ctrl+1..7
+        if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '8') {   // cheat hotkeys Ctrl+1..8
             if (!up) InterlockedOr(&s_cheatKeys, 1 << (k->vkCode - '1'));
             return 1;
         }

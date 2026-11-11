@@ -233,10 +233,25 @@ static void StorePalette(const void* data, UINT rowPitch, DXGI_FORMAT fmt, ID3D1
                         gPal[0xc8*4], gPal[0xc8*4+1], gPal[0xc8*4+2], gPal[0xcf*4], gPal[0xcf*4+1], gPal[0xcf*4+2], gPal[0xfe*4], gPal[0xfe*4+1], gPal[0xfe*4+2]);
     InterlockedExchange(&gPalValid, 1);
 }
+// p2den uploads each finished 8-bit frame through a CPU-written staging R8 texture (640x480, and its window-size 2D layer):
+// the overlay callback (p2vr: cheat messages) draws into that copy just before Unmap, so it shows on the desktop and in the
+// headset in every game phase, without touching the game's own buffers.
+static void (*gOverlayCb)(uint8_t* data, int pitch, int w, int h);
+void Capture_SetOverlayCallback(void (*f)(uint8_t*, int, int, int)) { gOverlayCb = f; }
+static ID3D11Resource* gIdxMappedRes; static uint8_t* gIdxMapped; static int gIdxPitch, gIdxW, gIdxH;
 static HRESULT STDMETHODCALLTYPE HkMap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT f, D3D11_MAPPED_SUBRESOURCE* m) {
     HRESULT hr = oMap(c, r, sub, t, f, m);
     DXGI_FORMAT fmt;
     if (SUCCEEDED(hr) && m && t != D3D11_MAP_READ && IsPaletteTex(r, &fmt)) { gPalMapped = m->pData; gPalMappedRes = r; gPalMappedPitch = m->RowPitch; }
+    else if (SUCCEEDED(hr) && m && t != D3D11_MAP_READ && gOverlayCb && r) {
+        D3D11_RESOURCE_DIMENSION dim; r->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+            D3D11_TEXTURE2D_DESC d; ((ID3D11Texture2D*)r)->GetDesc(&d);
+            if (d.Format == DXGI_FORMAT_R8_UNORM && d.Usage == D3D11_USAGE_STAGING && d.Width >= 640 && d.Height >= 480) {
+                gIdxMappedRes = r; gIdxMapped = (uint8_t*)m->pData; gIdxPitch = (int)m->RowPitch; gIdxW = (int)d.Width; gIdxH = (int)d.Height;
+            }
+        }
+    }
     return hr;
 }
 static void STDMETHODCALLTYPE HkUnmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub) {
@@ -244,6 +259,10 @@ static void STDMETHODCALLTYPE HkUnmap(ID3D11DeviceContext* c, ID3D11Resource* r,
         DXGI_FORMAT fmt; D3D11_TEXTURE2D_DESC d; ((ID3D11Texture2D*)r)->GetDesc(&d); fmt = d.Format;
         StorePalette(gPalMapped, gPalMappedPitch, fmt, r);
         gPalMapped = nullptr; gPalMappedRes = nullptr;
+    }
+    if (r && r == gIdxMappedRes && gIdxMapped) {
+        if (gOverlayCb) gOverlayCb(gIdxMapped, gIdxPitch, gIdxW, gIdxH);
+        gIdxMapped = nullptr; gIdxMappedRes = nullptr;
     }
     oUnmap(c, r, sub);
 }

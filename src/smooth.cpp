@@ -35,12 +35,29 @@ static void WINAPI HkSleepP(DWORD ms) { if (!OnGameThread()) { oSleepP(ms); retu
 // The idle callback runs there: same thread as the game, so BRender and the game's actors are safe to use.
 static void (*s_idleCb)(); static bool s_inCb; static LONG s_qpcCalls;
 void Smooth_SetIdleCallback(void (*cb)()) { s_idleCb = cb; }
+// Game speed (fast-forward cheat): p2den's clock = base + (real - base) * speed, continuous when the speed changes, so its
+// frame limiter runs the game that many times faster.
+struct ClockScale { LONGLONG realBase, fakeBase; LONG speed; };
+static ClockScale s_clock[2] = {{0, 0, 1}, {0, 0, 1}}; static volatile LONG s_clockIdx;
 static BOOL WINAPI HkQpcP(LARGE_INTEGER* c) {
     if (OnGameThread()) {
         s_qpcCalls++;
         if (s_idleCb && !s_inCb) { s_inCb = true; s_idleCb(); s_inCb = false; }
     }
-    return oQpcP(c);
+    BOOL r = oQpcP(c);
+    const ClockScale& k = s_clock[s_clockIdx & 1];
+    if (r && c && k.speed != 1) c->QuadPart = k.fakeBase + (c->QuadPart - k.realBase) * k.speed;
+    else if (r && c) c->QuadPart += k.fakeBase - k.realBase;           // after a fast period: the clock stays continuous
+    return r;
+}
+void Smooth_SetSpeed(int speed) {
+    if (!oQpcP || speed < 1) return;
+    LARGE_INTEGER t; oQpcP(&t);
+    const ClockScale& cur = s_clock[s_clockIdx & 1];
+    ClockScale& nxt = s_clock[(s_clockIdx + 1) & 1];
+    nxt.fakeBase = cur.fakeBase + (t.QuadPart - cur.realBase) * cur.speed;   // p2den's time now
+    nxt.realBase = t.QuadPart; nxt.speed = speed;
+    InterlockedIncrement(&s_clockIdx);
 }
 static BOOL WINAPI HkScvP(PCONDITION_VARIABLE cv, PSRWLOCK l, DWORD ms, ULONG f) {
     if (!OnGameThread()) return oScvP(cv, l, ms, f); LONGLONG t = Qpc(); BOOL r = oScvP(cv, l, ms, f); Acc(5, t); return r; }

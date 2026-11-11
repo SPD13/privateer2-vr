@@ -155,7 +155,7 @@ The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so 
 
 ## Cheats
 
-Seven cheats, in flight only:
+Eight cheats. All work in flight; **Get cash** and **Fast forward** also work on the ground (bases, menus, the PAD):
 
 | Cheat | Keyboard | SteamVR action | Joystick setting |
 |---|---|---|---|
@@ -166,15 +166,16 @@ Seven cheats, in flight only:
 | Invincible (toggle): your ship takes no damage until toggled off | Ctrl+5 | `[CHEAT] Invincible (toggle)` | `CHEAT_INVINCIBLE_BUTTON` |
 | Jump straight to destination: your next jump goes directly to the destination picked on the nav map instead of the next waypoint of the route | Ctrl+6 | `[CHEAT] Jump straight to destination` | `CHEAT_JUMP_BUTTON` |
 | Land now: in an area with a station, base or planet you can land on, you land there at once, without the approach and the landing request | Ctrl+7 | `[CHEAT] Land now` | `CHEAT_LAND_BUTTON` |
+| Fast forward (toggle): the game runs twice as fast (movement, combat, the game clock); press again for normal speed. It stays on in flight and on the ground until you switch it off | Ctrl+8 | `[CHEAT] Fast forward 2x (toggle)` | `CHEAT_SPEED_BUTTON` |
 
-- **Keyboard:** Ctrl+1 … Ctrl+7 are taken by the mod while the game window is in front, so the game does not see them.
+- **Keyboard:** Ctrl+1 … Ctrl+8 are taken by the mod while the game window is in front, so the game does not see them.
 - **VR controllers:** the SteamVR actions have no default binding. Bind them in *SteamVR > Settings > Controllers > Manage Controller Bindings > Privateer 2 VR*.
 - **Joystick:** p2den's Alt+J tool cannot list extra commands, so joystick buttons are set here. Use the Windows button number, as shown in Windows' *Game Controllers* properties (button 1 = 1). It works on any connected joystick. A button used for a cheat should be left unmapped (*None*) in Alt+J.
 
 | Setting | Default | Effect |
 |---|---|---|
 | `CHEATS` | `1` | `0` = all cheats off (keys, VR actions and joystick buttons). |
-| `CHEAT_<NAME>_BUTTON` | `0` | Joystick button for that cheat (`<NAME>` = `RESTORE`, `DESTROY_TARGET`, `DESTROY_ENEMIES`, `CASH`, `INVINCIBLE`, `JUMP`, `LAND`). `0` = none. |
+| `CHEAT_<NAME>_BUTTON` | `0` | Joystick button for that cheat (`<NAME>` = `RESTORE`, `DESTROY_TARGET`, `DESTROY_ENEMIES`, `CASH`, `INVINCIBLE`, `JUMP`, `LAND`, `SPEED`). `0` = none. |
 
 ## Testing automation
 

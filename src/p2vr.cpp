@@ -23,8 +23,9 @@
 #define P2VR_VERSION "dev"   // set by build.bat (release workflow: the tag without the v)
 #endif
 void Capture_Install(LogFn log);
+void Capture_SetOverlayCallback(void (*f)(uint8_t*, int, int, int));
 void Macro_Start(const char* dir, bool autoplay, LogFn log);
-void Smooth_Install(LogFn log); void Smooth_SetGameThread(); void Smooth_Report(double seconds); void Smooth_SetIdleCallback(void (*cb)());
+void Smooth_Install(LogFn log); void Smooth_SetSpeed(int speed); void Smooth_SetGameThread(); void Smooth_Report(double seconds); void Smooth_SetIdleCallback(void (*cb)());
 
 // ---------------------------------------------------------------- addresses (DARK.EXE 1997-10-15)
 static const uintptr_t ADDR_BEGIN = 0x46d517;   // BrZbSceneRenderBegin
@@ -104,6 +105,7 @@ static bool  g_retDynamic = false;
 static bool  g_retInEyes = true;     // crosshair + lead indicator drawn into the 3D image at infinity (ships occlude them)
 static float g_retFracP2 = 0.20f;    // crosshair region (fraction of the HUD width), same as RETICLE_SIZE
 static float g_observerBack = 1.0f;  // metres: eyes sit this far behind the ship centre (HUD plane passes the centre)
+static DWORD g_lastFlightTick;   // last flight frame (GetTickCount)
 static bool  g_showOwnShip = false;  // draw the player's own ship model in VR (visible once the eyes are behind it)    // crosshair/markers at the depth of what is under the crosshair
 static int   g_smooth = 1;
 // VR controllers
@@ -227,17 +229,23 @@ static void GetPal(PALETTEENTRY pe[256]) {
     for (int i = 0; i < 256; i++) { pe[i].peRed = p[i*4]; pe[i].peGreen = p[i*4+1]; pe[i].peBlue = p[i*4+2]; pe[i].peFlags = 0; }
 }
 
-static void WriteBmp(const char* name, const br_pixelmap* pm, const PALETTEENTRY* pal) {
-    char path[MAX_PATH]; sprintf_s(path, "%s\\%s", g_dir, name);
+// Bug-report captures (Ctrl+F9): each capture gets its own folder, <game>\p2vr-reports\<session start>\capture-NN, that every
+// dump file of it goes into, with context.txt and copies of p2vr.ini and p2vr.log (the launcher zips one for a bug report).
+static char g_capDir[MAX_PATH], g_capSession[MAX_PATH]; static int g_capCount; static DWORD g_capOpened;
+static void BeginCapture(bool flight); static void FinishCapture();
+static void WriteRgbBmp(const char* name, const uint8_t* rgb, int w, int h);
+static void WriteBmp(const char* name, const br_pixelmap* pm, const PALETTEENTRY* pal, int step = 1) {
+    char path[MAX_PATH]; sprintf_s(path, "%s\\%s", g_capDir[0] ? g_capDir : g_dir, name);
     FILE* f; if (fopen_s(&f, path, "wb")) return;
-    int w = pm->width, h = pm->height, stride = (w * 3 + 3) & ~3;
+    if (step < 1) step = 1;
+    int w = pm->width / step, h = pm->height / step, stride = (w * 3 + 3) & ~3;
     BITMAPFILEHEADER fh = {0x4D42, (DWORD)(54 + stride * h), 0, 0, 54};
     BITMAPINFOHEADER ih = {40, w, h, 1, 24, BI_RGB, (DWORD)(stride * h)};
     fwrite(&fh, 14, 1, f); fwrite(&ih, 40, 1, f);
     uint8_t* row = (uint8_t*)calloc(stride, 1);
     for (int y = h - 1; y >= 0; y--) {
-        const uint8_t* src = pm->pixels + (pm->base_y + y) * pm->row_bytes + pm->base_x;
-        for (int x = 0; x < w; x++) { const PALETTEENTRY& p = pal[src[x]]; row[x*3] = p.peBlue; row[x*3+1] = p.peGreen; row[x*3+2] = p.peRed; }
+        const uint8_t* src = pm->pixels + (pm->base_y + y * step) * pm->row_bytes + pm->base_x;
+        for (int x = 0; x < w; x++) { const PALETTEENTRY& p = pal[src[x * step]]; row[x*3] = p.peBlue; row[x*3+1] = p.peGreen; row[x*3+2] = p.peRed; }
         fwrite(row, stride, 1, f);
     }
     free(row); fclose(f); Log("wrote %s", path);
@@ -692,7 +700,7 @@ extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle 
     sprintf_s(n, "hud_%02d.bmp", g_hudDumpIdx); WriteBmp(n, (br_pixelmap*)g_lastCol, pal);
     {   // raw 8-bit HUD indices + palette + p2den's displayed HUD (RGB) for offline comparison
         static std::vector<uint8_t> rgb(640 * 480 * 3);
-        char f[MAX_PATH]; sprintf_s(f, "%s\\hudraw_%02d.bin", g_dir, g_hudDumpIdx);
+        char f[MAX_PATH]; sprintf_s(f, "%s\\hudraw_%02d.bin", g_capDir[0] ? g_capDir : g_dir, g_hudDumpIdx);
         FILE* fp; if (!fopen_s(&fp, f, "wb")) {
             br_pixelmap* gc = (br_pixelmap*)g_lastCol;
             for (int y = 0; y < 480; y++) fwrite(gc->pixels + (gc->base_y + y) * gc->row_bytes + gc->base_x, 1, 640, fp);
@@ -702,6 +710,7 @@ extern "C" void __cdecl PostHud() {   // static HUD done: the rest of the cycle 
         }
     }
     g_hudDumpIdx++;
+    FinishCapture();
 }
 
 // Target selection marker: the marker function blits sprite 0x3a at the target's projected position (call site 0x45442a). Its rectangle comes
@@ -1060,7 +1069,11 @@ extern "C" void __cdecl PostMarkers() {
     uint8_t pal[1024]; GetPalRGBX(pal);
     memcpy(g_mkLink, links, sizeof links); g_nMkLink = nb;
     for (int i = 0; i < nb; i++) if (blobs[i].layer == 0 && !links[i].actor) blobs[i].depthM = -2.0f;   // HUD glass
-    g_mkSerial = Vr_SubmitMarkers(both.data(), w * 4, h, pal, blobs, nb);
+    // the game's 2D layer (HUD, markers) is displayed by p2den with red and blue swapped against the 3D palette (see
+    // UpdateHudSwapLut): the markers get that palette too, so they show the flat game's colours (red / yellow, not blue)
+    uint8_t mkPal[1024]; memcpy(mkPal, pal, sizeof mkPal);
+    for (int c = 0; c < 256; c++) { mkPal[c*4] = pal[c*4 + 2]; mkPal[c*4 + 2] = pal[c*4]; }
+    g_mkSerial = Vr_SubmitMarkers(both.data(), w * 4, h, mkPal, blobs, nb);
     // exact 3D poses for this marker set right away, in the same (smoothed) state as the eye images on screen,
     // so the headset never shows the game's 30 Hz placement in between (that caused a jumping/double marker)
     g_posesWithEyes = false; ApplyBlend(BlendFactor()); UpdateMarkerPoses(); RestoreBlend(); g_posesWithEyes = true;
@@ -1378,6 +1391,7 @@ static void RenderVrCore() {
         if (g_vrDumpNext) {
             PALETTEENTRY pal[256]; GetPal(pal); char n[64];
             sprintf_s(n, "vr_%02d_%c.bmp", g_dumpCount, e ? 'R' : 'L'); WriteBmp(n, &g_vrPmC, pal);
+            if (e == 0 && g_capDir[0]) WriteBmp("view.bmp", &g_vrPmC, pal, 4);   // small preview for the launcher
         }
     }
     g_inEye2 = false;
@@ -1403,7 +1417,9 @@ static void RenderVrCore() {
 }
 
 // Extra frame while the game waits for its next cycle (called from p2den's spin-wait on the game thread).
+static void GroundCheats();
 static void IdleTick() {
+    GroundCheats();
     if (!g_frameDone || !g_smooth) return;
     LONGLONG now = Now(); g_lastSpin = now;
     if (Vr_FrameCounter() == g_lastVrFrame || !Vr_Active()) return;
@@ -1584,10 +1600,134 @@ extern "C" void __cdecl ApplyStick() {}
 //             -> 0x52d280, then the session ends and the base follows). The game sets it after the approach and comms:
 //             FUN_0043bf47 (cleared, +0x117c == 2, within 600 of the nearest base +0x278f4 of the area: base + 0x12; base 0:
 //             0x12 when 0x52d2a8) and FUN_0044b180 (planet, cleared: +0x278fc). The cheat sets the same value directly.
-enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_JUMP, CHEAT_LAND, CHEAT_COUNT };
-static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE", "JUMP", "LAND"};
-static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible", "cheat_jump_direct", "cheat_land"};
+//   fast forward (toggle, flight only): everything runs 2x. Frames: p2den paces the game at 30 Hz on QueryPerformanceCounter,
+//             which runs twice as fast for it (Smooth_SetSpeed). Game clock (0x4f0248, 100 Hz): a Miles timer, set to 200 Hz
+//             with the game's own AIL_set_timer_frequency (import 0x570500, timer handle 0x4f04ec). Back to normal when the
+//             space session ends (SpaceSessionThunk).
+enum { CHEAT_RESTORE, CHEAT_TARGET, CHEAT_ENEMIES, CHEAT_CASH, CHEAT_INVINCIBLE, CHEAT_JUMP, CHEAT_LAND, CHEAT_SPEED, CHEAT_COUNT };
+static const char* kCheatName[CHEAT_COUNT] = {"RESTORE", "DESTROY_TARGET", "DESTROY_ENEMIES", "CASH", "INVINCIBLE", "JUMP", "LAND", "SPEED"};
+static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_target", "cheat_destroy_enemies", "cheat_cash", "cheat_invincible", "cheat_jump_direct", "cheat_land", "cheat_fast_forward"};
+// Red confirmation message of a cheat, drawn into the game's HUD image (PostHud), so it shows on the desktop and in the
+// headset (on the HUD glass, centred above the crosshair, clear of the HUD panels) for 2.5 s.
+static char g_cheatMsg[96]; static DWORD g_cheatMsgUntil; static std::vector<uint8_t> g_cheatMask; static int g_cheatMaskFor = -1;
+static const int CHEAT_MSG_Y = 132, CHEAT_MSG_H = 22;
+static void CheatMessage(const char* fmt, ...) {
+    va_list a; va_start(a, fmt); vsprintf_s(g_cheatMsg, fmt, a); va_end(a);
+    g_cheatMsgUntil = GetTickCount() + 2500; g_cheatMaskFor = -1;
+}
+// drawn into p2den's 8-bit frame upload (Capture overlay callback): 640x480, or its window-size 2D layer where the game's
+// 4:3 picture is centred and scaled
+static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
+    if (!g_cheatMsg[0] || (int)(GetTickCount() - g_cheatMsgUntil) > 0 || !data) return;
+    static int msgSerial; static char drawn[96];
+    if (strcmp(drawn, g_cheatMsg) || g_cheatMaskFor < 0) {   // text -> 640 x 22 mask, through GDI
+        strcpy_s(drawn, g_cheatMsg); g_cheatMaskFor = ++msgSerial;
+        HDC dc = CreateCompatibleDC(nullptr);
+        BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = 640; bi.bmiHeader.biHeight = -CHEAT_MSG_H;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr; HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        g_cheatMask.assign(640 * CHEAT_MSG_H, 0);
+        if (bmp) {
+            HGDIOBJ ob = SelectObject(dc, bmp);
+            HFONT f = CreateFontA(18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0, "Arial");
+            HGDIOBJ of = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+            RECT r = {0, 0, 640, CHEAT_MSG_H}; DrawTextA(dc, drawn, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            GdiFlush();
+            const uint8_t* px = (const uint8_t*)bits;
+            for (int i = 0; i < 640 * CHEAT_MSG_H; i++) g_cheatMask[i] = px[i * 4 + 1] > 128;
+            SelectObject(dc, of); DeleteObject(f); SelectObject(dc, ob); DeleteObject(bmp);
+        }
+        DeleteDC(dc);
+    }
+    // the colour that shows red: p2den displays the HUD layer with red and blue swapped against the palette (UpdateHudSwapLut)
+    uint8_t pal[1024]; GetPalRGBX(pal); int red = 1, best = 1 << 30;
+    for (int c = 1; c < 256; c++) { int dr = pal[c*4+2] - 255, dg = pal[c*4+1] - 30, db = pal[c*4] - 30, e = dr*dr + 2*dg*dg + 2*db*db; if (e < best) { best = e; red = c; } }
+    float pw = H * 4.f / 3.f, ph = (float)H; if (pw > W) { pw = (float)W; ph = W * 3.f / 4.f; }   // the game's 4:3 picture
+    float ox = (W - pw) * 0.5f, oy = (H - ph) * 0.5f, s = ph / 480.f;
+    int y0 = (int)(oy + CHEAT_MSG_Y * s), y1 = (int)(oy + (CHEAT_MSG_Y + CHEAT_MSG_H) * s), x0 = (int)ox, x1 = (int)(ox + pw);
+    int sh = s >= 2 ? (int)s : 1;                                                        // shadow offset
+    for (int y = y0; y < y1 && y < H; y++) {
+        int my = (int)((y - oy) / s) - CHEAT_MSG_Y; if (my < 0 || my >= CHEAT_MSG_H) continue;
+        uint8_t* row = data + (size_t)y * pitch;
+        for (int x = x0; x < x1 && x < W; x++) {
+            int mx = (int)((x - ox) / s); if (mx < 0 || mx >= 640 || !g_cheatMask[my * 640 + mx]) continue;
+            if (y + sh < H && x + sh < W) data[(size_t)(y + sh) * pitch + x + sh] = 0;  // shadow (desktop; transparent on the VR HUD)
+        }
+        for (int x = x0; x < x1 && x < W; x++) {
+            int mx = (int)((x - ox) / s); if (mx >= 0 && mx < 640 && g_cheatMask[my * 640 + mx]) row[x] = (uint8_t)red;
+        }
+    }
+}
 static bool g_cheats = true; static int g_cheatButton[CHEAT_COUNT]; static bool g_invincible; static int g_savedInvuln;
+static int g_gameSpeed = 1;
+static void WriteRgbBmp(const char* name, const uint8_t* rgb, int w, int h) {   // top-down RGB -> 24-bit BMP
+    char path[MAX_PATH]; sprintf_s(path, "%s\\%s", g_capDir[0] ? g_capDir : g_dir, name);
+    FILE* f; if (fopen_s(&f, path, "wb")) return;
+    int stride = (w * 3 + 3) & ~3;
+    BITMAPFILEHEADER fh = {0x4D42, (DWORD)(54 + stride * h), 0, 0, 54};
+    BITMAPINFOHEADER ih = {40, w, h, 1, 24, BI_RGB, (DWORD)(stride * h)};
+    fwrite(&fh, 14, 1, f); fwrite(&ih, 40, 1, f);
+    std::vector<uint8_t> row(stride, 0);
+    for (int y = h - 1; y >= 0; y--) {
+        for (int x = 0; x < w; x++) { const uint8_t* s = rgb + (y * w + x) * 3; row[x*3] = s[2]; row[x*3+1] = s[1]; row[x*3+2] = s[0]; }
+        fwrite(row.data(), stride, 1, f);
+    }
+    fclose(f); Log("wrote %s", path);
+}
+static void BeginCapture(bool flight) {
+    char reports[MAX_PATH]; sprintf_s(reports, "%s\\p2vr-reports", g_dir); CreateDirectoryA(reports, nullptr);
+    if (!g_capSession[0]) {
+        SYSTEMTIME st; GetLocalTime(&st);
+        sprintf_s(g_capSession, "%s\\%04d-%02d-%02d_%02d-%02d-%02d", reports, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        CreateDirectoryA(g_capSession, nullptr);
+    }
+    g_capCount++;
+    sprintf_s(g_capDir, "%s\\capture-%02d", g_capSession, g_capCount); CreateDirectoryA(g_capDir, nullptr);
+    g_capOpened = GetTickCount();
+    char path[MAX_PATH]; sprintf_s(path, "%s\\context.txt", g_capDir);
+    FILE* f; if (!fopen_s(&f, path, "w")) {
+        SYSTEMTIME st; GetLocalTime(&st);
+        fprintf(f, "Privateer 2 VR bug report capture %d\n", g_capCount);
+        fprintf(f, "mod version: %s\n", P2VR_VERSION);
+        fprintf(f, "time: %04d-%02d-%02d %02d:%02d:%02d\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        fprintf(f, "phase: %s\n", flight ? "flight" : "ground (menus / base / PAD / film)");
+        fprintf(f, "VR session: %s\n", Vr_Active() ? "running" : "not running");
+        fprintf(f, "game speed: %dx, invincible: %s, cheats: %s\n", g_gameSpeed, g_invincible ? "on" : "off", g_cheats ? "enabled" : "disabled");
+        fprintf(f, "credits: %d\n", *(int*)0x52e23c);
+        fprintf(f, "control method byte: %02x, joystick pass-through: %s\n", *(uint8_t*)ADDR_CTRL_METHOD, g_joyPass ? "on" : "off");
+        if (flight && g_game) {
+            int player = *(int*)(g_game + GAME_PLAYER); uint8_t* me = g_game + player * SHIP_STRIDE;
+            fprintf(f, "player ship: index %d, type %d\n", player, *(int*)(me + 0x11e6) >> 16);
+            fprintf(f, "shields: %d %d %d %d, armour: %d %d %d %d\n", *(int16_t*)(me + 0x12de), *(int16_t*)(me + 0x12e0), *(int16_t*)(me + 0x12e2),
+                    *(int16_t*)(me + 0x12e4), *(int16_t*)(me + 0x12e6), *(int16_t*)(me + 0x12e8), *(int16_t*)(me + 0x12ea), *(int16_t*)(me + 0x12ec));
+            fprintf(f, "target: %d, nav point: %d, destination: %d, area base: %d, planet: %d\n", *(int*)(me + 0x1216) >> 16,
+                    *(int16_t*)(me + 0x13b2), *(int16_t*)(me + 0x13b4), *(int*)(g_game + 0x278f4), *(int*)(g_game + 0x278fc));
+        }
+        fprintf(f, "\nThe session log (p2vr.log) and settings (p2vr.ini) at the time of the capture are in this folder.\n");
+        fclose(f);
+    }
+    Log("[report] capture %d: %s (%s)", g_capCount, g_capDir, flight ? "flight" : "ground");
+}
+static void FinishCapture() {
+    if (!g_capDir[0]) return;
+    char src[MAX_PATH], dst[MAX_PATH];
+    sprintf_s(src, "%s\\p2vr.ini", g_dir); sprintf_s(dst, "%s\\p2vr.ini", g_capDir); CopyFileA(src, dst, FALSE);
+    Log("[report] capture %d complete", g_capCount);
+    if (g_log) fflush(g_log);
+    sprintf_s(src, "%s\\p2vr.log", g_dir); sprintf_s(dst, "%s\\p2vr.log", g_capDir); CopyFileA(src, dst, FALSE);
+    CheatMessage("CAPTURE %d SAVED FOR A BUG REPORT", g_capCount);
+    g_capDir[0] = 0;
+}
+extern "C" void __cdecl SetGameSpeed(int speed) {   // game thread
+    if (speed == g_gameSpeed) return;
+    g_gameSpeed = speed;
+    Smooth_SetSpeed(speed);
+    int timer = *(int*)0x4f04ec;
+    typedef int (__stdcall *PFN_AIL_set_timer_frequency)(int timer, int hz);
+    PFN_AIL_set_timer_frequency setFreq = *(PFN_AIL_set_timer_frequency*)0x570500;
+    if (timer >= 0 && setFreq) setFreq(timer, 100 * speed);
+    Log("[cheat] game speed %dx (frames and game clock, timer %d)", speed, timer);
+}
 static void GameDamage(uint8_t* game, int ship, int damage) {
     __asm {
         pushad
@@ -1629,11 +1769,14 @@ static void DoCheat(int which) {
         }
         *(int16_t*)(g_game + 0x27896) = 255;
         Log("[cheat] shields %d and armour %d restored (ship type %d)", *(const int16_t*)(0x4c694e + type * 0x48), *(const int16_t*)(0x4c6952 + type * 0x48), type);
+        CheatMessage("CHEAT: SHIELDS AND ARMOR RESTORED");
         break; }
     case CHEAT_TARGET: {
         int tgt = *(int*)(me + 0x1216) >> 16;
-        if (tgt < 0) { Log("[cheat] destroy target: no target"); break; }
-        Log("[cheat] destroy target %d: %s", tgt, DestroyShip(tgt) ? "destroyed" : "not destroyable");
+        if (tgt < 0) { Log("[cheat] destroy target: no target"); CheatMessage("CHEAT: NO TARGET"); break; }
+        bool ok = DestroyShip(tgt);
+        Log("[cheat] destroy target %d: %s", tgt, ok ? "destroyed" : "not destroyable");
+        CheatMessage(ok ? "CHEAT: TARGET DESTROYED" : "CHEAT: THIS TARGET CANNOT BE DESTROYED");
         break; }
     case CHEAT_ENEMIES: {
         int zone = *(int*)0x52e2fc, n = 0, tried = 0;
@@ -1647,33 +1790,82 @@ static void DoCheat(int which) {
             tried++; if (DestroyShip(i)) n++;
         }
         Log("[cheat] destroy all enemies: %d of %d destroyed", n, tried);
+        if (n) CheatMessage(n == 1 ? "CHEAT: 1 ENEMY DESTROYED" : "CHEAT: %d ENEMIES DESTROYED", n); else CheatMessage("CHEAT: NO ENEMIES HERE");
         break; }
     case CHEAT_CASH:
         GameAddCredits(g_game, 100000);
         Log("[cheat] +100000 credits: %d", *(int*)0x52e23c);
+        CheatMessage("CHEAT: +100,000 CREDITS");
         break;
     case CHEAT_INVINCIBLE:
         g_invincible = !g_invincible;
         if (g_invincible) g_savedInvuln = *(int*)(g_game + 0x27d0c); else *(int*)(g_game + 0x27d0c) = g_savedInvuln;
         Log("[cheat] invincible %s", g_invincible ? "on" : "off");
+        CheatMessage(g_invincible ? "CHEAT: INVINCIBLE ON" : "CHEAT: INVINCIBLE OFF");
+        break;
+    case CHEAT_SPEED:
+        SetGameSpeed(g_gameSpeed == 1 ? 2 : 1);
+        CheatMessage(g_gameSpeed == 2 ? "CHEAT: FAST FORWARD 2X" : "CHEAT: NORMAL SPEED");
         break;
     case CHEAT_LAND: {
         int base = *(int*)(g_game + 0x278f4), planet = *(int*)(g_game + 0x278fc), where = -1;
         if (base >= 1 && base <= 0x10) where = base + 0x12;                     // a station / base in this area
         else if (base == 0 && *(int*)0x52d2a8 != 0) where = 0x12;               // the special base 0, when the game allows it
         else if (planet != -1) where = planet;                                  // a planet
-        if (where < 0) { Log("[cheat] land now: nowhere to land in this area (base %d, planet %d)", base, planet); break; }
+        if (where < 0) { Log("[cheat] land now: nowhere to land in this area (base %d, planet %d)", base, planet); CheatMessage("CHEAT: NOWHERE TO LAND HERE"); break; }
         *(int*)(g_game + 0x1144) = where;
         Log("[cheat] land now: landing at location %d (base %d, planet %d)", where, base, planet);
+        CheatMessage("CHEAT: LANDING");
         break; }
     case CHEAT_JUMP: {
         int here = *(int16_t*)(me + 0x13b2), dest = *(int16_t*)(me + 0x13b4);
         if (dest < 0 || dest >= 0xe2 || here < 0 || here >= 0xe2 || dest == here) {
-            Log("[cheat] jump direct: no destination set (here %d, destination %d)", here, dest); break; }
+            Log("[cheat] jump direct: no destination set (here %d, destination %d)", here, dest); CheatMessage("CHEAT: NO DESTINATION SET"); break; }
         *(int16_t*)(me + 0x13b6) = 1;
+        CheatMessage("CHEAT: NEXT JUMP GOES STRAIGHT TO THE DESTINATION");
         Log("[cheat] jump direct: next jump goes from nav point %d straight to %d (the route's next stop was %d)", here, dest,
             *(const uint8_t*)(0x4cdadc + here * 0xe2 + dest));
         break; }
+    }
+}
+// On the ground (bases, menus, PAD: no flight frame for 0.5 s) only "get cash" and "fast forward" apply; run from the idle
+// callback, which p2den's frame pacing calls on the game thread in every phase. The other cheat keys are ignored there.
+static void GroundCheats() {
+    static DWORD last; DWORD now = GetTickCount();
+    if (now - last < 20) return;
+    last = now;
+    {   // bug-report capture on the ground (menus, bases, PAD): the displayed screen, context, settings and log
+        static bool was; bool f9 = (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_F9) & 0x8000) && GameInFront();
+        if (f9 && !was && now - g_lastFlightTick >= 500 && !g_capDir[0]) {
+            BeginCapture(false);
+            static std::vector<uint8_t> rgb(640 * 480 * 3);
+            if (Capture_GetHudRGB(rgb.data())) WriteRgbBmp("screen.bmp", rgb.data(), 640, 480);
+            FinishCapture();
+        }
+        was = f9;
+    }
+    if (!g_cheats || now - g_lastFlightTick < 500) return;
+    int keys = Macro_TakeCheatKeys();
+    bool held[CHEAT_COUNT] = {};
+    for (auto& dv : JoyDevices()) {
+        JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS};
+        if (joyGetPosEx(dv.id, &ji) != JOYERR_NOERROR) continue;
+        for (int k = 0; k < CHEAT_COUNT; k++) if (g_cheatButton[k] > 0 && g_cheatButton[k] <= 32 && ((ji.dwButtons >> (g_cheatButton[k] - 1)) & 1)) held[k] = true;
+    }
+    VrControls c = {};
+    if (Vr_Active() && Vr_GetControls(&c))
+        for (int i = 0; i < kVrCommandCount; i++) if ((c.buttons >> i) & 1)
+            for (int k = 0; k < CHEAT_COUNT; k++) if (!strcmp(kVrCommands[i].action, kCheatAction[k])) held[k] = true;
+    static bool was[CHEAT_COUNT]; bool down[CHEAT_COUNT] = {};
+    for (int k = 0; k < CHEAT_COUNT; k++) { down[k] = ((keys >> k) & 1) || (held[k] && !was[k]); was[k] = held[k]; }
+    if (down[CHEAT_CASH]) {
+        *(int*)0x52e23c += 100000;                               // the player's credits (the in-flight routine also needs flight data)
+        Log("[cheat] +100000 credits (ground): %d", *(int*)0x52e23c);
+        CheatMessage("CHEAT: +100,000 CREDITS");
+    }
+    if (down[CHEAT_SPEED]) {
+        SetGameSpeed(g_gameSpeed == 1 ? 2 : 1);
+        CheatMessage(g_gameSpeed == 2 ? "CHEAT: FAST FORWARD 2X" : "CHEAT: NORMAL SPEED");
     }
 }
 static void RunCheats() {
@@ -1708,10 +1900,16 @@ static bool g_spacePrompt = true;
 static volatile bool g_newSpaceSession;
 static const uintptr_t ADDR_SPACE_SESSION = 0x438137;
 static uintptr_t g_spaceSessionFn = ADDR_SPACE_SESSION;
-__declspec(naked) static void SpaceSessionThunk() {
+extern "C" void __cdecl SetGameSpeed(int speed);
+extern "C" void __cdecl SpaceSessionEnded() {}   // (fast forward stays as toggled, in flight and on the ground)
+__declspec(naked) static void SpaceSessionThunk() {   // eax = game; plain ret: call the session, then reset the game speed
     __asm {
         mov byte ptr [g_newSpaceSession], 1
-        jmp dword ptr [g_spaceSessionFn]
+        call dword ptr [g_spaceSessionFn]
+        pushad
+        call SpaceSessionEnded
+        popad
+        ret
     }
 }
 struct FireJoy { UINT id; DWORD mask; };
@@ -1795,7 +1993,6 @@ static void CheckHits() {
 // ---------------------------------------------------------------- 2D sprite hook (menus / PAD)
 // Both sprite blitters (0x41305a, 0x4144e0; cdecl view, shapes, id, x, y) pass through SpriteFilter, which can move a
 // sprite before it is drawn. Used to put the PAD's cursor sprite exactly on the pointer (its drawing is offset).
-static DWORD g_lastFlightTick;
 static int g_cursorId = -1, g_cursorDx = 0, g_cursorDy = 0; static void* g_cursorShapes;
 static bool g_spriteLog = false;
 static void CursorGamePos(int* gx, int* gy) {   // Windows cursor -> game 640x480 coordinates (4:3 area of the window)
@@ -1874,6 +2071,7 @@ static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
     }
 }
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
+    Smooth_SetGameThread();                                         // (game thread: menus and bases too, for the ground cheats)
     if (g_cursorFix) DetectCursorOffset((uint32_t)xy[-4], xy[0], xy[1], view);   // also the nav map, opened during flight
     if (GetTickCount() - g_lastFlightTick < 500) return;            // only menus / films / PAD
     if (g_cursorId >= 0 && id == g_cursorId && (!g_cursorShapes || shapes == g_cursorShapes)) { xy[0] += g_cursorDx; xy[1] += g_cursorDy; }
@@ -2035,6 +2233,8 @@ extern "C" void __cdecl PostEnd() {
             if (nowt - lastChk > 500) { lastChk = nowt; char f[MAX_PATH]; sprintf_s(f, "%s\\dumpnow", g_dir);
                 if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); g_dumpRequested = true; } }
         }
+        if (g_capDir[0] && GetTickCount() - g_capOpened > 2000) FinishCapture();   // (a view without the flight HUD)
+        if (g_dumpRequested && !g_capDir[0]) BeginCapture(true);
         if (g_vrEnable && Vr_Active()) {
             if (g_dumpRequested) { g_dumpRequested = false; g_vrDumpNext = true; g_hudDumpNext = true; }
             RenderVrEyes();
@@ -2054,6 +2254,7 @@ extern "C" void __cdecl PostEnd() {
             g_dumpRequested = false;
             PALETTEENTRY pal[256]; GetPal(pal); char n[64];
             sprintf_s(n, "frame_%02d.bmp", g_dumpCount++); WriteBmp(n, (br_pixelmap*)g_lastCol, pal);
+            FinishCapture();
         }
     }
     DWORD now = GetTickCount();
@@ -2413,7 +2614,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         Log("p2vr %s loaded: mode=%d ipd=%.3f sweep=%.1f fovscale=%.2f eye=%dx%d", P2VR_VERSION, g_mode, g_ipd, g_sweepDeg, g_fovScale, g_eyeW, g_eyeH);
         InstallHooks();
         if (GetPrivateProfileIntA("VR", "EYE_MAX", 2048, p) > 2048) Log("BRender 2048 size check lifted: %d", LiftSizeLimit());
-        if (g_vrEnable) { Capture_Install(Log); Vr_Start(p, Log); Vr_SetObserverBack(g_observerBack); }
+        if (g_vrEnable) { Capture_Install(Log); Capture_SetOverlayCallback(DrawCheatOverlay); Vr_Start(p, Log); Vr_SetObserverBack(g_observerBack); }
         Smooth_Install(Log);
         Smooth_SetIdleCallback(IdleTick);
         Macro_Start(g_dir, GetPrivateProfileIntA("VR", "AUTOPLAY", 0, p) != 0, Log);

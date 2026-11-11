@@ -125,12 +125,12 @@ The game's own keyboard controls all work. The mod adds:
 |---|---|
 | Ctrl+F12 | Recenter the view |
 | Ctrl+F2 / Ctrl+F3 | Record / replay an input macro (testing) |
-| Ctrl+F9 | Save debug images of the current frame |
-| Ctrl+1 … Ctrl+7 | Cheats, see [Cheats](#cheats) |
+| Ctrl+F9 | Save a capture for a bug report, see [Reporting a bug](#reporting-a-bug) |
+| Ctrl+1 … Ctrl+8 | Cheats, see [Cheats](#cheats) |
 
 ## Cheats
 
-The mod adds seven cheats for flying (they only work in space, not in menus or bases):
+The mod adds eight cheats. They work in flight; **Get cash** and **Fast forward** also work on the ground (bases, menus, the PAD). Each one shows a red confirmation message for a few seconds, on the monitor and in the headset.
 
 | Cheat | What it does | Keyboard |
 |---|---|---|
@@ -141,12 +141,13 @@ The mod adds seven cheats for flying (they only work in space, not in menus or b
 | **Invincible** | Your ship takes no damage. Press again to turn it off. | Ctrl+5 |
 | **Jump straight to destination** | Your next jump takes you directly to the destination you picked on the nav map, instead of the next waypoint of the route. Your wingmen follow. | Ctrl+6 |
 | **Land now** | In an area with a station, base or planet you can land on, you land there at once: no approach, no landing request over comms. | Ctrl+7 |
+| **Fast forward** | The whole game runs twice as fast: flying, combat, the game clock. Press again to come back to normal speed. It stays on, in flight and on the ground, until you switch it off. | Ctrl+8 |
 
 Ships the game itself treats as indestructible are not affected by the destroy cheats.
 
 ### Using them
 
-- **Keyboard:** press **Ctrl+1** to **Ctrl+7** in flight. The mod catches these keys while the game window is in front, so the game itself does not react to them.
+- **Keyboard:** press **Ctrl+1** to **Ctrl+8** in flight. The mod catches these keys while the game window is in front, so the game itself does not react to them.
 - **VR controllers:** each cheat is a SteamVR action, with no button assigned by default:
   1. Start the game in VR.
   2. Open *SteamVR > Settings > Controllers > Manage Controller Bindings* and choose **Privateer 2 VR**.
@@ -158,24 +159,45 @@ Ships the game itself treats as indestructible are not affected by the destroy c
      - `[CHEAT] Invincible (toggle)`
      - `[CHEAT] Jump straight to destination`
      - `[CHEAT] Land now`
-- **Joystick or HOTAS:** the game's Alt+J joystick tool can't list extra commands, so joystick buttons for the cheats are set in `p2vr.ini` in the game folder:
-  1. Find the button number in Windows: *Set up USB game controllers* (`joy.cpl`) > your joystick > *Properties*. Press the button and note the number that lights up.
-  2. Set it for the cheat you want, for example:
+     - `[CHEAT] Fast forward 2x (toggle)`
+- **Joystick or HOTAS:** the game's Alt+J joystick tool can't list extra commands, so joystick buttons for the cheats are set in `p2vr.ini`:
+  1. **Find the button's number.** Press **Win+R**, type `joy.cpl` and press Enter. Select your joystick and click **Properties**. Press the button you want to use: the number that lights up is the one to use.
+  2. **Open `p2vr.ini`** in the game folder, with any text editor. The launcher's **Open game folder** button opens that folder; it is the Steam game's `Windows` folder, e.g. `…\steamapps\common\Privateer 2 The Darkening\Windows`.
+  3. **Set the button for each cheat you want** in the `[VR]` section. The lines are already there, set to `0` (no button):
      ```ini
-     CHEAT_RESTORE_BUTTON=5
-     CHEAT_DESTROY_TARGET_BUTTON=6
-     CHEAT_DESTROY_ENEMIES_BUTTON=0
-     CHEAT_CASH_BUTTON=0
-     CHEAT_INVINCIBLE_BUTTON=7
-     CHEAT_JUMP_BUTTON=0
-     CHEAT_LAND_BUTTON=0
+     CHEAT_RESTORE_BUTTON=0          ; restore shield and armor
+     CHEAT_DESTROY_TARGET_BUTTON=0   ; destroy target
+     CHEAT_DESTROY_ENEMIES_BUTTON=0  ; destroy all enemies
+     CHEAT_CASH_BUTTON=0             ; +100,000 credits (also on the ground)
+     CHEAT_INVINCIBLE_BUTTON=0       ; invincible on/off
+     CHEAT_JUMP_BUTTON=0             ; next jump straight to the destination
+     CHEAT_LAND_BUTTON=0             ; land now
+     CHEAT_SPEED_BUTTON=0            ; fast forward 2x on/off (also on the ground)
      ```
-     `0` means no button. Any connected joystick's button with that number triggers the cheat.
-  3. In the Alt+J tool, leave those buttons on *None*, so they don't also send a game command.
+     For example, `CHEAT_SPEED_BUTTON=12` makes button 12 toggle fast forward.
+  4. **In the Alt+J tool**, set those buttons to *None*, so they don't also trigger a game command.
+  5. **Restart the game**: `p2vr.ini` is only read at startup.
+
+  Only buttons **1 to 32** can be used for cheats, because Windows reports at most 32 buttons per joystick to the mod. If several joysticks are connected, the button with that number on any of them triggers the cheat.
 
 ### Turning cheats off
 
 Set `CHEATS=0` in `p2vr.ini` to disable all of them: keys, VR actions and joystick buttons. All the settings are described in [SETTINGS.md](SETTINGS.md#cheats).
+
+## Reporting a bug
+
+If something doesn't work or looks wrong, a bug report with a capture of the problem helps us fix it quickly:
+
+1. **Capture the problem in the game.** Press **Ctrl+F9** while the problem is on screen, in flight or on the ground (menus, bases, PAD). A red message confirms *"CAPTURE n SAVED FOR A BUG REPORT"*. Each capture saves:
+   - both eye images, a preview and the HUD, in flight; the displayed screen, on the ground
+   - the game state: phase, position, target, shields, active cheats…
+   - your settings (`p2vr.ini`) and the mod's log at that moment
+
+   You can make several captures; they are kept per session in the `p2vr-reports` folder of the game.
+2. **Make the bug report zip.** Open the launcher (the **Privateer 2 VR** shortcut) and click **Report a bug** at the bottom. It lists the captures of your recent sessions with a preview and a summary. Pick the one showing the problem and click **Save bug report (.zip)**. The zip is saved in your **Downloads** folder, with the launcher's log and basic system information (Windows version, mod and launcher versions).
+3. **Open a GitHub issue.** Click **Open a GitHub issue** in the same place (or go to [Issues](https://github.com/SPD13/privateer2-vr/issues) > *New issue* > *Bug report*). Describe what happened and how to make it happen, then drag the zip into the issue. GitHub accepts attachments up to 25 MB; if the zip is bigger, share it with a file sharing service and paste the link.
+
+The zip contains no personal files: only the captured images, the mod's logs and settings, and the system information listed above.
 
 ## Settings (`p2vr.ini`)
 
@@ -205,7 +227,7 @@ Open the launcher (or the installer) and choose **Uninstall the VR mod…**. It 
   - `p2vr.log` in the game folder: the mod.
   - `%LOCALAPPDATA%\p2vr-installer\installer.log`: the installer and launcher.
 
-  Please attach them to bug reports in [Issues](https://github.com/SPD13/privateer2-vr/issues).
+  Please report bugs as described in [Reporting a bug](#reporting-a-bug).
 
 ---
 
