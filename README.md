@@ -291,6 +291,7 @@ Pushing a tag `vX.Y.Z` builds and publishes a release: the mod archive `privatee
 - [RELEASING.md](RELEASING.md): versioning, release workflow, local builds.
 - `SPIKE_REPORT.md`: the feasibility spike and its go/no-go result.
 - `notes/RE_NOTES.md`: addresses, structures and algorithms found by reverse engineering.
+- `notes/SESSION_NOTES.md`: development notes from the cheats / bug report / transition work: game data, D3D11 and p2den behaviour, the flight-or-flat logic, pitfalls and working practices.
 - `docs/hud-positioning.png`: the HUD positioning diagram, drawn by `scripts/make_hud_diagram.py` from the default panel layout and an in-game HUD capture (`docs/hud-capture.png`). Run it again after changing the panel defaults.
 - `docs/steam-frame-controls.png`: the Steam Frame controller bindings, drawn by `scripts/make_controller_diagram.py` from a photo of the controllers. Run it again after changing the Frame defaults in `src/commands.h`.
 
