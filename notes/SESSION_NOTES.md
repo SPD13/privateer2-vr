@@ -108,13 +108,17 @@ Ship slots for other ships: `0x1D..0x94` (29..148).
 **Flight tag for each screen frame** (`Vr_SetScreenSource`). A screen frame is flight only if all three hold since the previous screen frame:
 1. **The game's own once-per-cycle eye render happened** (`Vr_NoteFlightFrame`, called from `RenderVrEyes`). The extra smoothing renders (`IdleTick` → `RenderVrCore`) do **not** count: they keep running between game cycles, and counting them tagged the first nav map frame as flight.
 2. **The flight HUD was finished** (`Vr_NoteHudDone` from `PostHud`).
-3. **Fewer than 3 nav-map sprites were drawn after the HUD** (`Vr_NoteFlatDraw`).
+3. **Fewer than 3 flat-screen sprites were drawn after the HUD** (`Vr_NoteFlatDraw`).
 
 **Why check 3 is needed:** opening the nav map (Alt+N) happens *inside* a flight cycle. The cycle renders the 3D view and draws the HUD, then the map is drawn over the same frame, and that frame is presented. Checks 1 and 2 both pass for it, so it went onto the HUD quad at 1 m for one game frame, then jumped to the flat screen at 2.5 m. Users see "the map drawn close, then pushed away" or "left/right out of sync".
-- The sprite hooks (`SpriteFilter`, `SpriteDetect` → `NotePostHudDraw`) count only sprites drawn after `PostHud` (`g_frameDone`), outside our own eye renders (`g_inEye2`), and only from the nav map's call sites **0x45A000..0x45C000**.
+- The sprite hooks (`SpriteFilter`, `SpriteDetect` → `NotePostHudDraw`) count only sprites drawn after `PostHud` (`g_frameDone`), outside our own eye renders (`g_inEye2`), and only from the call sites of the flat screens that open from flight, **0x45A000..0x460000**.
 - The flight HUD itself draws ~13 sprites after `PostHud` from **0x44C265**. Counting every call site turned all of flight into "flat" (no stars, no 3D).
-- Nav map sprite call sites seen: 0x45AE73, 0x45ADB5, 0x45AFA3, 0x45AE46, 0x45AF6E, 0x45B0D5; cursor 0x45B6D8.
-- Other flat screens opened from flight (options…) are not covered by check 3. The fade's HUD hiding (below) limits the effect.
+- Call sites seen, by screen:
+  - nav map (Alt+N): 0x45AE73, 0x45ADB5, 0x45AFA3, 0x45AE46, 0x45AF6E, 0x45B0D5; cursor 0x45B6D8;
+  - diary (Alt+D), options (Alt+O) and hotkeys (Alt+H): three blocks, 0x45C592..0x45CC90, 0x45D08A..0x45D526 and 0x45F400..0x45F622.
+- To find a new screen's call sites, log each distinct `ret` in `NotePostHudDraw` once, then open the screen from flight.
+- When the diary opens, the game runs one more plain flight cycle (only 0x44C265) between two diary frames. With the fade this is just a short dim, not a wrong frame.
+- 0x42207F (cursor 0x422626) draws after a switch to flat, so it is not a first-frame case.
 
 The shown mode is `flight = targetDone && eyes rendered < 300 ms ago && screenFlight`.
 
@@ -228,5 +232,5 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
 
 - **Missiles not visible in VR** (they are in the flat game): unresolved. A Ctrl+F9 capture with a missile in flight was requested and not yet analysed.
 - **Ground message colour on bases / PAD screens:** per-screen swap detection is in place, but the user hasn't confirmed it on every screen.
-- **Other flat screens opened from flight** (not the nav map) may still show their first frame on the HUD glass for one game frame.
+- **Flat screens opened from flight other than the nav map, diary, options and hotkeys** may still show their first frame on the HUD glass for one game frame.
 - **`dist/p2vr.ini` comment** "at most 8 panels" should say 12.

@@ -2121,12 +2121,13 @@ static void DetectCursorOffset(uint32_t ret, int x, int y, const int* view) {
         Log("[cursor] drawn from %08x, view at (%d,%d), %d,%d from the mouse: VR pointer offset (%d,%d)", ret, view[1], view[2], dx, dy, ox, oy);
     }
 }
-// Nav map sprites drawn after the flight HUD was finished: the nav map opened during flight presents its first frame
-// from the cycle that rendered the 3D view, so that frame must go to the flat screen, not the HUD. Only the nav map's
-// own call sites (0x45a000..0x45c000) count: the flight HUD itself draws sprites late too (0x44c265).
+// Flat-screen sprites drawn after the flight HUD was finished: the screens opened during flight (nav map, diary, options,
+// hotkeys) present their first frame from the cycle that rendered the 3D view, so that frame must go to the flat screen,
+// not the HUD. Only those screens' call sites count (0x45a000..0x460000: nav map 0x45a..0x45b, the others 0x45c592..0x45cc90,
+// 0x45d08a..0x45d526, 0x45f400..0x45f622): the flight HUD itself draws sprites late too (0x44c265).
 static void NotePostHudDraw(uint32_t ret) {
     if (!g_frameDone || g_inEye2 || GetTickCount() - g_lastFlightTick > 1000) return;
-    if (ret < 0x45a000 || ret >= 0x45c000) return;
+    if (ret < 0x45a000 || ret >= 0x460000) return;
     Vr_NoteFlatDraw();
 }
 extern "C" void __cdecl SpriteFilter(int id, void* shapes, int* xy, int* view) {
