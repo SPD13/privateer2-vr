@@ -103,6 +103,48 @@ func TestInstall(t *testing.T) {
 	}
 }
 
+// An update run by the launcher in the game folder replaces that launcher: the new one must take over (it runs the
+// new version's steps, e.g. the bHaptics files); an update that does not change the running launcher must not restart.
+func TestInstallRestartsReplacedLauncher(t *testing.T) {
+	src, archive := os.Getenv("P2VR_TEST_GAME"), os.Getenv("P2VR_TEST_ARCHIVE")
+	if src == "" || archive == "" {
+		t.Skip("P2VR_TEST_GAME / P2VR_TEST_ARCHIVE not set")
+	}
+	dir := filepath.Join(t.TempDir(), "Windows")
+	os.MkdirAll(dir, 0o755)
+	copyFile(t, filepath.Join(src, gameExe), filepath.Join(dir, gameExe))
+	copyFile(t, filepath.Join(src, "p2den.dll"), filepath.Join(dir, "p2den.dll"))
+	launcher := filepath.Join(dir, launcherExe)
+	os.WriteFile(launcher, []byte("the old launcher"), 0o755)
+
+	var started []string
+	exited := -1
+	selfExe = func() string { return launcher }
+	launchLauncher = func(exe, d string) error { started = append(started, exe, d); return nil }
+	exitProcess = func(code int) { exited = code }
+	defer func() { selfExe, launchLauncher, exitProcess = thisExe, startLauncher, os.Exit }()
+
+	a := newApp("t", dir, archive)
+	a.state.Game = inspectGame(dir, "chosen")
+	a.install(false)
+	if a.state.Job.Failed {
+		t.Fatalf("install failed: %s", a.state.Job.Message)
+	}
+	if len(started) != 2 || !strings.EqualFold(started[0], launcher) || started[1] != dir || exited != 0 {
+		t.Fatalf("replaced launcher: started %v, exit %d", started, exited)
+	}
+	if _, err := os.Stat(launcher + ".old"); err != nil {
+		t.Fatalf("the old launcher was not kept as .old: %v", err)
+	}
+
+	// the same version again: the running launcher is unchanged, no restart
+	started, exited = nil, -1
+	a.install(false)
+	if a.state.Job.Failed || started != nil || exited != -1 {
+		t.Fatalf("unchanged launcher: failed %v, started %v, exit %d", a.state.Job.Failed, started, exited)
+	}
+}
+
 func TestFindGames(t *testing.T) {
 	paths, sources := findGames()
 	for _, p := range paths {

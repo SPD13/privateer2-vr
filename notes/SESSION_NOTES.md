@@ -198,6 +198,7 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
 ## 9. Releases
 
 - Push a `vX.Y.Z` tag. The release workflow builds and publishes, and the notes list the commit titles since the previous tag.
+- **Launcher self-update:** an update started from the launcher in the game folder replaces that launcher while it runs, so the rest of that session runs the *old* launcher's code. v0.1.4 → v0.1.5 hit this: no bHaptics files until the launcher was reopened. Since v0.1.6 the launcher starts the new one and exits after replacing itself (`install` in `installer/app.go`, test `TestInstallRestartsReplacedLauncher`). Anything a new version must do at install time still has to be repeated at a later point (e.g. `ensureBhaptics` on Play in VR) for updates run by older launchers.
 - Commit titles are not player-friendly. After the workflow, rewrite the notes with `gh release edit vX.Y.Z --notes-file …`: keep the "## Install" paragraph and write a player-facing "## Changes" list. Skip dev-only items like the macro recorder and diagnostics.
 - Watch the run with `gh run watch <id> --exit-status`.
 - Released this session: v0.1.1 (panel fixes), v0.1.2 (cheats), v0.1.3 (bug reports, fast forward, messages, marker colours, fade, nav map fix).

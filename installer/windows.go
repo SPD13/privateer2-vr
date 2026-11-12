@@ -189,6 +189,13 @@ func startGame(dir string, vr bool) error {
 	return cmd.Start()
 }
 
+// startLauncher: a launcher .exe, for the game folder dir (after a self-update)
+func startLauncher(exe, dir string) error {
+	cmd := exec.Command(exe, "--dir", dir)
+	cmd.Dir = dir
+	return cmd.Start()
+}
+
 // startSteamVR: through Steam (SteamVR's app id 250820)
 func startSteamVR() { openBrowser("steam://rungameid/250820") }
 

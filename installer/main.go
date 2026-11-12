@@ -51,7 +51,15 @@ func main() {
 	logf("%s %s on %s/%s (%s)", appTitle, version, runtime.GOOS, runtime.GOARCH, thisExe())
 	// the launcher copy in the game folder: that folder, and the copy left by a self-update removed
 	if exe := thisExe(); exe != "" {
-		os.Remove(exe + ".old")
+		// the copy left by a self-update: the old launcher may still be closing after starting this one
+		go func(old string) {
+			for i := 0; i < 40; i++ {
+				if err := os.Remove(old); err == nil || os.IsNotExist(err) {
+					return
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+		}(exe + ".old")
 		if *dir == "" && strings.EqualFold(filepath.Base(exe), launcherExe) {
 			if d, ok := normalizeGameDir(filepath.Dir(exe)); ok {
 				*dir = d

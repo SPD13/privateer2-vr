@@ -371,11 +371,19 @@ func writeFile(path string, data []byte) error {
 	return nil
 }
 
+// the running launcher, starting the new one and leaving after a self-update (replaced in tests)
+var (
+	selfExe        = thisExe
+	launchLauncher = startLauncher
+	exitProcess    = os.Exit
+)
+
 func (a *app) install(shortcut bool) {
 	job, game, latest, err := a.beginJob("install")
 	if err != nil {
 		return
 	}
+	restart := "" // the running launcher was replaced by a different version: hand over to it at the end
 	err = func() error {
 		if !game.Valid {
 			return errors.New("Choose the game folder first.")
@@ -453,7 +461,13 @@ func (a *app) install(shortcut bool) {
 		}
 		a.line(job, "note", "P2VR.dll and openxr_loader.dll copied")
 		if launcher := files[strings.ToLower(launcherExe)]; launcher != nil {
-			if err := replaceExe(filepath.Join(dir, launcherExe), launcher); err != nil {
+			path := filepath.Join(dir, launcherExe)
+			if self := selfExe(); self != "" && strings.EqualFold(filepath.Clean(self), filepath.Clean(path)) {
+				if cur, err := os.ReadFile(path); err == nil && sha256Of(cur) != sha256Of(launcher) {
+					restart = path
+				}
+			}
+			if err := replaceExe(path, launcher); err != nil {
 				return err
 			}
 			a.line(job, "note", "Launcher P2VR-Launcher.exe added (play in VR or flat, updates)")
@@ -506,9 +520,23 @@ func (a *app) install(shortcut bool) {
 			a.line(job, "note", "Shortcuts \"%s\" added to the desktop and the Start menu", shortcutName)
 		}
 		a.line(job, "ok", "Privateer 2 VR %s is installed", latest.Version)
+		if restart != "" {
+			a.line(job, "note", "Restarting the launcher (version %s)", latest.Version)
+		}
 		return nil
 	}()
 	a.endJob(job, err)
+	// This launcher replaced itself: the steps that only the new version has (e.g. the bHaptics support files on "Play
+	// in VR") would not run in this process, so the new launcher takes over, in the same game folder.
+	if err == nil && restart != "" {
+		time.Sleep(1500 * time.Millisecond) // the page shows the result first
+		if rerr := launchLauncher(restart, game.Path); rerr != nil {
+			logf("restart: %v (the new launcher runs at the next start)", rerr)
+			return
+		}
+		logf("restart: new launcher started, closing this one")
+		exitProcess(0)
+	}
 }
 
 func (a *app) download(job *jobState, latest releaseInfo) (string, error) {
