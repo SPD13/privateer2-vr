@@ -13,7 +13,11 @@ What it does:
 - **A cockpit HUD around you.** The HUD is split into panels on a sphere around your head, each angled towards you: radar, shields, target display, comms, missiles and velocity. Their placement is configurable.
 - **Markers in 3D.** The crosshair sits on the ship's gun line. Target brackets and the missile-lock reticle are attached to the target at its real distance. Direction arrows stay on the HUD glass.
 - **Fly with the VR controllers**, or a joystick / HOTAS configured with the game's own tool. You get controller rumble when firing or hit.
-- **bHaptics TactSuit support:** feel hits from the direction they come from, your guns, missiles, the afterburner and jumps. See [bHaptics TactSuit](#bhaptics-tactsuit).
+- **bHaptics TactSuit support:** feel the flight on your body (tested with the TactSuit X40):
+  - hits from the direction they come from, your guns and missiles, the afterburner, jumps and landing;
+  - a heartbeat when your armour is low, and your ship's destruction.
+
+  See [bHaptics TactSuit](#bhaptics-tactsuit).
 - **Menus, bases, the PAD and the FMV films** play on a large virtual screen. You point and click with the controller.
 - **Cheat codes:**
   - eight optional cheats: restore shields and armour, destroy the target or all enemies, +100,000 credits, invincibility, jump straight to the destination, land now, and 2x fast forward;
@@ -210,20 +214,45 @@ The zip contains no personal files: only the captured images, the mod's logs and
 
 ## bHaptics TactSuit
 
-With a bHaptics TactSuit and **bHaptics Player** running, you feel the flight on your body:
+With a bHaptics TactSuit and **bHaptics Player** running, you feel the flight on your body. The mod was tuned on the **TactSuit X40**. Other TactSuits should work the same way, since bHaptics Player spreads the effects over the suit's motors.
 
-- **Hits** buzz on the side the attacker is on: front or back, left or right, high or low. Bigger hits are stronger.
-- **Your guns** tap your chest at each shot. A **missile** launch is a strong thump.
-- The **afterburner** rumbles on your lower back while it burns.
-- A **jump** sends a wave from your chest to your back; **landing** a soft wave up from the waist.
-- A **heartbeat** warns that your armour is low, and the vest bursts and fades when your ship is destroyed.
+### Setup
 
-Setup:
 1. Install [bHaptics Player](https://www.bhaptics.com/software/player/), pair the suit, and start bHaptics Player before the game.
 2. Install or update the mod with the launcher. When it finds bHaptics Player, it adds the bHaptics support files (`bhaptics_library.dll`, from bHaptics' own SDK). If you install bHaptics Player later, **Play in VR** adds them.
-3. In bHaptics Player, turn off the audio-to-haptics feature for this game, or its vibrations mix with the mod's.
+3. If you use bHaptics Player's **Audio-to-Haptics** mode for other games, **switch it off** (music-note icon) before playing. It is a global mode, not a per-game setting, and it replaces or mixes with the mod's effects: random vibrations that follow the sounds, stronger with the lasers. It is off unless you switched it on yourself.
+4. Put the suit on and press **Ctrl+0** in the game to check it (see [Testing the suit](#testing-the-suit)).
 
-**Ctrl+0** plays a test sequence on the vest. Strengths and the heartbeat threshold are in `p2vr.ini` ([SETTINGS.md](SETTINGS.md#bhaptics-tactsuit)). Without bHaptics Player nothing is downloaded, loaded or run.
+Without bHaptics Player, nothing is downloaded, loaded or run, so players without a suit pay nothing for this feature. `BHAPTICS=0` in `p2vr.ini` turns it off even with a suit.
+
+### What you feel
+
+The effects play only in flight. Each has its own strength setting in `p2vr.ini` ([SETTINGS.md](SETTINGS.md#bhaptics-tactsuit)), and `BHAPTICS_INTENSITY` scales them all.
+
+| Event | Where | How it feels | Setting |
+|---|---|---|---|
+| **Hit** on your ship | On the side the attacker is on: front or back, left or right, high or low | A buzz. Bigger hits are stronger and last longer (about 0.1 to 0.25 s). | `BHAPTICS_HITS` |
+| **Gun shot** | Upper chest, alternating left and right like the two guns | A light tap at each shot | `BHAPTICS_SHOTS` |
+| **Missile** launch | Centre of the chest | A strong thump, then a softer echo | `BHAPTICS_MISSILE` |
+| **Afterburner** | Lower back | A low rumble for as long as it burns | `BHAPTICS_AFTERBURNER` |
+| **Jump** | Front, then back | A wave from the shoulders down the chest, then through to the back | `BHAPTICS_JUMP` |
+| **Landing** | Front and back together | A soft wave up from the waist | `BHAPTICS_JUMP` |
+| **Low armour** | Left side of the chest | A heartbeat ("lub-dub") once your armour falls below 35%. It beats about every 1.3 s just below that, speeding up to every 0.5 s and getting stronger as the armour drops towards 0%. | `BHAPTICS_HEARTBEAT`, `BHAPTICS_HEARTBEAT_BELOW` |
+| **Ship destroyed** | The whole vest | A full burst that fades out over about a second | (always on) |
+
+The hit direction is worked out from where the attacker is relative to your ship, not from where you are looking. A shot from behind is felt on your back even when you have turned your head around.
+
+**Every effect stops** as soon as you leave the flight: nav map, diary, options, landing, quitting or death. Nothing keeps buzzing while you are in a menu or at a base.
+
+### Testing the suit
+
+Press **Ctrl+0** in the game. The vest plays a test sequence: single motors at the shoulders and waist, front and back, then a spot on your left side, then every motor in turn. `p2vr.log` names each step as it plays, so you can check that left, right, front and back are where they should be. The test also runs when bHaptics Player does not report the suit as connected.
+
+### Troubleshooting
+
+- **Nothing at all:** check that bHaptics Player is running and shows the suit connected, then restart the game. `p2vr.log` has a `[haptics]` line at startup saying whether bHaptics Player was found. `BHAPTICS_LAUNCH_PLAYER=1` starts bHaptics Player with the game.
+- **Random vibrations, or vibrations that follow the sounds:** bHaptics Player's Audio-to-Haptics mode is on. Switch it off (music-note icon) while you play; it applies to every game.
+- **Too strong or too weak:** lower or raise `BHAPTICS_INTENSITY` for everything, or one effect's own setting. `0` turns an effect off (`BHAPTICS_HEARTBEAT_BELOW=0` for the heartbeat).
 
 ## HUD Positioning
 

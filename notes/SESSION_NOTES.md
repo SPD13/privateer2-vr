@@ -235,9 +235,9 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
   - **Jump:** area short `+0x13B2` changes. **Landing:** `game+0x1144` leaves −1.
   - **Death:** dying flag. **Heartbeat:** armour (4 sides, `+0x12E6..`) against 4 × max armour (`0x4C6952 + type*0x48`) below `BHAPTICS_HEARTBEAT_BELOW` percent.
     `game+0x27896` is **not** a stored hull value: the game recomputes it from the armour every cycle (`decomp_post.c`), so writing it does nothing.
-  - **Not yet confirmed on the vest:** death, heartbeat and landing.
+  - **All effects confirmed on the X40** (Nov 12). The heartbeat stays at the strength first tested (`BHAPTICS_HEARTBEAT` default 1.0, at the user's request); its tempo runs from about 1.3 s just below the threshold to 0.5 s near 0% armour.
 - Every effect stops when the flight is left (`GroundCheats`: flight → not flight).
-- bHaptics Player's own **audio-to-haptics** feature makes random vibrations, stronger with the laser sounds. Users should turn it off for this game.
+- bHaptics Player's own **Audio-to-Haptics** mode makes random vibrations, stronger with the laser sounds. It is a **global** Player mode (music-note icon / Quick Control Panel), switched on by the user, not a per-game setting, and per bHaptics it replaces native game haptics. Users who use it for other games must switch it off before playing.
 
 ## 11. Working practices that held up
 

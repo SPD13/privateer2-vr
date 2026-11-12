@@ -41,7 +41,7 @@ static struct {
 static HMODULE g_lib;
 
 // ---------------------------------------------------------------- settings
-static float g_master = 1.0f, g_sShots = 0.35f, g_sHits = 1.0f, g_sMissile = 0.8f, g_sAfter = 0.3f, g_sJump = 0.7f, g_sHeart = 0.5f;
+static float g_master = 1.0f, g_sShots = 0.35f, g_sHits = 1.0f, g_sMissile = 0.8f, g_sAfter = 0.3f, g_sJump = 0.7f, g_sHeart = 1.0f;
 static bool  g_frontLeftCol0 = true, g_backLeftCol0 = false;   // which grid column is the wearer's left (calibration)
 
 // ---------------------------------------------------------------- commands (game thread -> worker)
@@ -234,7 +234,7 @@ void Haptics_Init(const char* ini, const char* gameDir, void (*log)(const char*,
     }
     g_master = IniF(ini, "BHAPTICS_INTENSITY", 1.0f); g_sShots = IniF(ini, "BHAPTICS_SHOTS", 0.35f); g_sHits = IniF(ini, "BHAPTICS_HITS", 1.0f);
     g_sMissile = IniF(ini, "BHAPTICS_MISSILE", 0.8f); g_sAfter = IniF(ini, "BHAPTICS_AFTERBURNER", 0.3f); g_sJump = IniF(ini, "BHAPTICS_JUMP", 0.7f);
-    g_sHeart = IniF(ini, "BHAPTICS_HEARTBEAT", 0.5f);
+    g_sHeart = IniF(ini, "BHAPTICS_HEARTBEAT", 1.0f);
     if (B.isPlayerRunning && !B.isPlayerRunning()) {
         if (GetPrivateProfileIntA("VR", "BHAPTICS_LAUNCH_PLAYER", 0, ini) && B.launchPlayer) { Log("[haptics] starting bHaptics Player"); B.launchPlayer(true); }
         else Log("[haptics] bHaptics Player is not running: the vest stays off until it is started");

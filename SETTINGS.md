@@ -165,7 +165,7 @@ With a bHaptics TactSuit (tested with the TactSuit X40) and **bHaptics Player** 
 - a wave through the vest on a **jump**, and up from the waist on **landing**;
 - a **heartbeat** when your armour is low, and a fading burst when your ship is destroyed.
 
-The launcher downloads the bHaptics support files (`bhaptics_library.dll`, from bHaptics' own SDK) only when bHaptics Player is installed. Without it, nothing is downloaded or run. In bHaptics Player, turn off its audio-to-haptics feature for this game, or it adds its own vibrations to the mod's.
+The launcher downloads the bHaptics support files (`bhaptics_library.dll`, from bHaptics' own SDK) only when bHaptics Player is installed. Without it, nothing is downloaded or run. If you use bHaptics Player's Audio-to-Haptics mode for other games, switch it off (music-note icon) before playing: it is a global mode, not a per-game setting, and it replaces or mixes with the mod's effects.
 
 | Setting | Default | Effect |
 |---|---|---|
@@ -176,7 +176,7 @@ The launcher downloads the bHaptics support files (`bhaptics_library.dll`, from 
 | `BHAPTICS_MISSILE` | `0.8` | Strength of the missile launch thump. |
 | `BHAPTICS_AFTERBURNER` | `0.3` | Strength of the afterburner rumble. |
 | `BHAPTICS_JUMP` | `0.7` | Strength of the jump and landing waves. |
-| `BHAPTICS_HEARTBEAT` | `0.5` | Strength of the low-armour heartbeat. |
+| `BHAPTICS_HEARTBEAT` | `1.0` | Strength of the low-armour heartbeat. |
 | `BHAPTICS_HEARTBEAT_BELOW` | `35` | Armour left (percent of the ship's maximum) below which the heartbeat starts: about one beat every 1.3 s just below it, up to one every 0.5 s near 0%. `0` = no heartbeat. |
 | `BHAPTICS_LAUNCH_PLAYER` | `0` | `1` = start bHaptics Player with the game if it is not running. |
 | `BHAPTICS_API_KEY`, `BHAPTICS_WORKSPACE_ID` | (empty) | For developers: bHaptics SDK credentials for your own builds (release builds have them built in). |
