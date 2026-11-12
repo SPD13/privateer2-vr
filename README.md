@@ -14,6 +14,9 @@ What it does:
 - **Markers in 3D.** The crosshair sits on the ship's gun line. Target brackets and the missile-lock reticle are attached to the target at its real distance. Direction arrows stay on the HUD glass.
 - **Fly with the VR controllers**, or a joystick / HOTAS configured with the game's own tool. You get controller rumble when firing or hit.
 - **Menus, bases, the PAD and the FMV films** play on a large virtual screen. You point and click with the controller.
+- **Cheat codes:**
+  - eight optional cheats: restore shields and armour, destroy the target or all enemies, +100,000 credits, invincibility, jump straight to the destination, land now, and 2x fast forward;
+  - on Ctrl+1..8, a controller button or a joystick button, each confirmed by a red message. See [Cheats](#cheats).
 - **Launcher and installer:** one click to install or update, and to start the game in VR or flat.
 
 No game files are included: you need your own copy of the game.
