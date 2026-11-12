@@ -53,6 +53,8 @@ jobs:
         shell: cmd
         env:
           P2VR_VERSION: ${{ env.VERSION }}
+          P2VR_BHAPTICS_KEY: ${{ secrets.BHAPTICS_SDK_KEY }}            # bHaptics TactSuit support (empty: off)
+          P2VR_BHAPTICS_WORKSPACE: ${{ secrets.BHAPTICS_WORKSPACE_ID }}
         run: src\build.bat
 
       - uses: actions/setup-go@v5

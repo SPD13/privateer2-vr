@@ -485,7 +485,14 @@ func (a *app) install(shortcut bool) {
 			return err
 		}
 
-		// 4. shortcuts
+		// 4. bHaptics TactSuit support files, only for players with bHaptics Player (never fails the install)
+		if msg, err := ensureBhaptics(dir); err != nil {
+			a.line(job, "note", "%v", err)
+		} else if msg != "" {
+			a.line(job, "note", "%s", msg)
+		}
+
+		// 5. shortcuts
 		if shortcut {
 			target, args := filepath.Join(dir, vrExe), ""
 			if _, err := os.Stat(filepath.Join(dir, launcherExe)); err == nil {
@@ -624,6 +631,11 @@ func (a *app) play(vr, closeAfter bool) {
 		if vr {
 			if !g.Installed || g.NeedsRepair != "" {
 				return errors.New("Install the VR mod first.")
+			}
+			if msg, err := ensureBhaptics(g.Path); err != nil { // bHaptics Player installed since the mod was: fetch the support files
+				logf("launch: %v", err)
+			} else if msg != "" {
+				logf("launch: %s", msg)
 			}
 			if !steamVRRunning() {
 				set("Starting SteamVR…")

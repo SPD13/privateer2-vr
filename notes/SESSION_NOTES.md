@@ -212,6 +212,33 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
   - The photo is probably Valve's product image: the user was told and chose to publish it.
 - PIL multiline text accepts only the vertical anchors `a`/`m`/`d` (not `t`/`s`/`b`).
 
+## 10b. bHaptics TactSuit (`src/haptics.cpp`, `installer/bhaptics.go`)
+
+- **SDK:** bHaptics' C SDK `bhaptics/tact-cpp2` (pinned commit `bfe4c02b`, SDK 2.8.2) ships a 32-bit `sdk/lib/x86/bhaptics_library.dll`. It is loaded with `LoadLibrary` + `GetProcAddress` (`__cdecl`).
+- **Credentials:** even direct motor control needs `registryAndInit(sdkApiKey, workspaceId, "")` with a Developer Portal workspace that has a deployed event. They are compiled in from `P2VR_BHAPTICS_KEY` / `P2VR_BHAPTICS_WORKSPACE` (GitHub secrets `BHAPTICS_SDK_KEY` / `BHAPTICS_WORKSPACE_ID` in releases). `BHAPTICS_API_KEY` / `BHAPTICS_WORKSPACE_ID` in `p2vr.ini` override them for dev. Never commit them.
+- **No overhead without a suit:** `Haptics_Init` returns at once (one log line) without the DLL, without bHaptics Player installed, without credentials, or with `BHAPTICS=0`.
+  - It runs from the ground-cheats thread, not `DllMain`: `LoadLibrary` under the loader lock risks a deadlock.
+  - The installer downloads the DLL and the licence files (SHA-256 checked) only when bHaptics Player is installed. The `P2VR_NO_BHAPTICS` environment variable simulates "not installed" for tests.
+- **Threading:** every SDK call blocks and is serialized, so one worker thread owns them all. The game thread only queues commands (`Push`), and `Haptics_*` return at once when `g_hapticsOn` is false.
+- **`isbHapticsConnected(0)` returns false for a working TactSuit X40,** and `getDeviceInfoJson` is empty. So `g_hapticsOn` = Player connected (`wsIsConnected`), and the suit check is only logged.
+- **Motors:** driven with `playDot` (32 values: front 4×4 then back 4×4, row 0 = shoulders; the Player spreads them over the X40's 2×20).
+  - Calibrated on the X40: front column 0 = wearer's left, back column 0 = wearer's right (`g_frontLeftCol0 = true`, `g_backLeftCol0 = false`).
+  - `Spot()` blends motors around an (x, y) point, with x 0 = wearer's left.
+- **Calibration:** Ctrl+0 (swallowed in `macro.cpp`), or a `hapticstest` file in the game folder, plays a logged test sequence. It also runs without a reported suit.
+- **Events** (all from `PostEnd` once per cycle):
+  - **Hits:** `CheckHits`. Direction from the attacker recorded by the damage function, short `entry+0x1222`, then `AttackerDirection` (attacker − player in ship space via the ship actor matrix, `WorldPos`). The hit directions felt right on the X40.
+  - **Shots and missiles:** `DetectShots` classifies each learned model on its first launch.
+    - A laser moves more than 3 units in its first cycle (~7.3).
+    - A missile can wait a cycle (ignition), then gets more than 1 unit ahead of its spawn point within ~1.5 s (45 cycles). The missile model spawns at about (−0.87, −0.37, 0) under the ship.
+    - Objects that never move ahead (debris at the ship centre) are ignored.
+  - **Afterburner:** the game sets the speed setpoint `entry+0x1298` to **2 × max speed** while it burns, so the effect is on when the setpoint is above 1.15 × max. The held-key table byte for Tab stays 0 with joystick or VR input, so it is not used.
+  - **Jump:** area short `+0x13B2` changes. **Landing:** `game+0x1144` leaves −1.
+  - **Death:** dying flag. **Heartbeat:** armour (4 sides, `+0x12E6..`) against 4 × max armour (`0x4C6952 + type*0x48`) below `BHAPTICS_HEARTBEAT_BELOW` percent.
+    `game+0x27896` is **not** a stored hull value: the game recomputes it from the armour every cycle (`decomp_post.c`), so writing it does nothing.
+  - **Not yet confirmed on the vest:** death, heartbeat and landing.
+- Every effect stops when the flight is left (`GroundCheats`: flight → not flight).
+- bHaptics Player's own **audio-to-haptics** feature makes random vibrations, stronger with the laser sounds. Users should turn it off for this game.
+
 ## 11. Working practices that held up
 
 **Repository and environment:**

@@ -156,6 +156,33 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 
 The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so they can be reassigned in the SteamVR binding screen.
 
+## bHaptics TactSuit
+
+With a bHaptics TactSuit (tested with the TactSuit X40) and **bHaptics Player** running, you feel the flight on your body:
+- **hits** from the direction the attacker is in (front or back, left or right, high or low), stronger for bigger hits;
+- a light tap on the chest for each **gun shot**, a thump for each **missile**;
+- a rumble on the lower back while the **afterburner** burns;
+- a wave through the vest on a **jump**, and up from the waist on **landing**;
+- a **heartbeat** when your armour is low, and a fading burst when your ship is destroyed.
+
+The launcher downloads the bHaptics support files (`bhaptics_library.dll`, from bHaptics' own SDK) only when bHaptics Player is installed. Without it, nothing is downloaded or run. In bHaptics Player, turn off its audio-to-haptics feature for this game, or it adds its own vibrations to the mod's.
+
+| Setting | Default | Effect |
+|---|---|---|
+| `BHAPTICS` | `1` | Use a TactSuit when bHaptics Player is installed and running. `0` = never. |
+| `BHAPTICS_INTENSITY` | `1.0` | Overall strength of every vest effect (0..1). |
+| `BHAPTICS_SHOTS` | `0.35` | Strength of the tap for each gun shot. `0` = none. |
+| `BHAPTICS_HITS` | `1.0` | Strength of the hits. |
+| `BHAPTICS_MISSILE` | `0.8` | Strength of the missile launch thump. |
+| `BHAPTICS_AFTERBURNER` | `0.3` | Strength of the afterburner rumble. |
+| `BHAPTICS_JUMP` | `0.7` | Strength of the jump and landing waves. |
+| `BHAPTICS_HEARTBEAT` | `0.5` | Strength of the low-armour heartbeat. |
+| `BHAPTICS_HEARTBEAT_BELOW` | `35` | Armour left (percent of the ship's maximum) below which the heartbeat starts: about one beat every 1.3 s just below it, up to one every 0.5 s near 0%. `0` = no heartbeat. |
+| `BHAPTICS_LAUNCH_PLAYER` | `0` | `1` = start bHaptics Player with the game if it is not running. |
+| `BHAPTICS_API_KEY`, `BHAPTICS_WORKSPACE_ID` | (empty) | For developers: bHaptics SDK credentials for your own builds (release builds have them built in). |
+
+Ctrl+0 plays a test sequence on the vest (single motors on the front and back, then every motor in turn); `p2vr.log` names each step.
+
 ## Cheats
 
 Eight cheats. All work in flight; **Get cash** and **Fast forward** also work on the ground (bases, menus, the PAD):
@@ -208,6 +235,7 @@ These are for development; leave them at their defaults for play.
 | Ctrl+F2 | Start / stop recording an input macro (`macro.txt`). |
 | Ctrl+F3 | Replay the macro / abort a replay. |
 | Ctrl+F9 | Dump eye images to BMP (debug screenshots). |
+| Ctrl+0 | bHaptics TactSuit test sequence (see [bHaptics TactSuit](#bhaptics-tactsuit)). |
 | Ctrl+F5/F6/F7 | Spike test modes 0/1/2 (when VR is inactive). |
 | Ctrl+F8 | Toggle wide FOV (spike). |
 | Ctrl+F10/F11 | Halve / double the spike IPD. |

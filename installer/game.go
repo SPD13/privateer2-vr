@@ -38,7 +38,8 @@ const (
 )
 
 // files the mod adds (removed on uninstall; p2vr.ini only when asked)
-var modFiles = []string{vrExe, modDll, "openxr_loader.dll", versionFile, defaultsFile, "P2VR-README.md", "P2VR-SETTINGS.md", "p2vr.log", launcherExe, launcherExe + ".old"}
+var modFiles = []string{vrExe, modDll, "openxr_loader.dll", versionFile, defaultsFile, "P2VR-README.md", "P2VR-SETTINGS.md", "p2vr.log", launcherExe, launcherExe + ".old",
+	"bhaptics_library.dll", "bHaptics-LICENSE.txt", "bHaptics-THIRD_PARTY_NOTICES.txt"}
 
 type gameInfo struct {
 	Path        string   `json:"path"`              // the folder of DARK.EXE

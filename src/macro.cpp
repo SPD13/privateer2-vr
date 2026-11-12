@@ -157,6 +157,7 @@ static void StartReplay() {
     CreateThread(nullptr, 0, ReplayThread, nullptr, 0, nullptr);
 }
 
+static volatile LONG s_hapticsTestKey;   // Ctrl+0 pressed (bHaptics calibration)
 static volatile LONG s_cheatKeys;   // cheat hotkeys (Ctrl+1..5) pressed, see Macro_TakeCheatKeys
 static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
@@ -184,6 +185,10 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
         // during a replay, real keys must not disturb the game (only Ctrl+F3 = abort gets through above)
         if (s_replaying && !injected && GameHasFocus() && k->vkCode != VK_CONTROL && k->vkCode != VK_LCONTROL && k->vkCode != VK_RCONTROL) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
+            return 1;
+        }
+        if (!injected && ctrl && GameHasFocus() && k->vkCode == '0') {   // Ctrl+0: bHaptics calibration
+            if (!up) InterlockedExchange(&s_hapticsTestKey, 1);
             return 1;
         }
         if (!injected && ctrl && GameHasFocus() && k->vkCode >= '1' && k->vkCode <= '8') {   // cheat hotkeys Ctrl+1..8
@@ -254,6 +259,7 @@ void Macro_Shutdown() {
 }
 // cheat hotkeys pressed since the last call (bit 0 = Ctrl+1 ... bit 4 = Ctrl+5)
 int Macro_TakeCheatKeys() { return (int)InterlockedExchange(&s_cheatKeys, 0); }
+bool Macro_TakeHapticsTestKey() { return InterlockedExchange(&s_hapticsTestKey, 0) != 0; }
 // Esc pressed by the player (keyboard or VR controller) while a replay runs: the sequence went wrong -> stop it
 void Macro_Abort(const char* why) {
     if (!s_replaying || s_abort) return;

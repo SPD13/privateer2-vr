@@ -19,6 +19,7 @@
 #include <vector>
 #include <unordered_map>
 #include "vr.h"
+#include "haptics.h"
 #ifndef P2VR_VERSION
 #define P2VR_VERSION "dev"   // set by build.bat (release workflow: the tag without the v)
 #endif
@@ -508,33 +509,55 @@ static MovedActor g_moved[128]; static int g_nMoved;
 
 static bool IsBoltModel(void* m) { for (int i = 0; i < g_nBoltModels; i++) if (g_boltModels[i] == m) return true; return false; }
 
-// Gun rumble, once per game cycle (real positions, not the smoothed renders): a shot is a bolt at the muzzle that was not
-// visible, or was further ahead, in the previous cycle. The game reuses its bolt actors: a bolt that finished its flight
-// can be put back at the guns while still visible, so "became visible" alone misses most shots of a burst.
-static std::unordered_map<uint8_t*, float> g_boltAhead;   // per actor: distance ahead of the ship last cycle, < -1e8 = not a bolt
+// Shots and missiles leaving the player's ship, once per game cycle (real positions, not the smoothed renders), for the
+// controller rumble and the TactSuit. The models are the ones WidenShots learns (whatever spawns at the ship). Each is
+// classified from its first launch: a laser bolt flies ~7 units in its first cycle; a missile may wait a cycle (ignition)
+// and then leaves slowly, so it is a missile once it got more than 1 unit ahead of where it appeared within ~1.5 s;
+// anything that never moves ahead (debris, effects at the ship) is ignored. A spawn is an actor at the ship that was not
+// there, or was further ahead, in the previous cycle: the game reuses bolt actors while they are still visible.
+struct ShotTrack { float ahead, spawnAhead; int age; bool pending; };
+static std::unordered_map<uint8_t*, ShotTrack> g_shotTrack;   // per actor: last cycle (ahead < -1e8 = not tracked)
+static std::unordered_map<void*, int> g_modelKind;            // 1 laser, 2 missile, 3 other
 static void DetectShots() {
     uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
     if (!game || !wfg) return;
     uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
     if (!ship) return;
     const float* sm = (const float*)(ship + ACTOR_T_MAT); const float* sp = sm + 9;
-    int shots = 0;
+    int shots = 0, missiles = 0;
     for (uint8_t* a = *(uint8_t**)(wfg + 8); a; a = *(uint8_t**)a) {
         if (a == ship || *(uint8_t**)(a + 0xC) != wfg) continue;
         void* model = *(void**)(a + 0x18);
-        bool bolt = a[0x12] == 1 && model && IsBoltModel(model);
-        auto it = g_boltAhead.find(a); float prev = it == g_boltAhead.end() ? -1e9f : it->second;
-        if (!bolt) { if (it != g_boltAhead.end()) it->second = -1e9f; continue; }
+        auto it = g_shotTrack.find(a);
+        if (!(a[0x12] == 1 && model && IsBoltModel(model))) { if (it != g_shotTrack.end()) it->second = {-1e9f, 0, 0, false}; continue; }
+        ShotTrack st = it == g_shotTrack.end() ? ShotTrack{-1e9f, 0, 0, false} : it->second;
         const float* t = (const float*)(a + ACTOR_T_MAT) + 9;
         float d[3] = {t[0] - sp[0], t[1] - sp[1], t[2] - sp[2]};
         float v[3]; for (int k = 0; k < 3; k++) v[k] = d[0] * sm[k*3] + d[1] * sm[k*3 + 1] + d[2] * sm[k*3 + 2];
         float ahead = -v[2];
         bool atGuns = fabsf(v[0]) < 4.f && fabsf(v[1]) < 3.f && ahead > -0.5f && ahead < 6.f;
-        if (atGuns && (prev < -1e8f || prev > ahead + 2.f)) shots++;   // new, or put back at the guns
-        g_boltAhead[a] = ahead;
+        bool spawn = atGuns && (st.ahead < -1e8f || st.ahead > ahead + 2.f);
+        int& kind = g_modelKind[model];
+        if (spawn) { st.pending = true; st.spawnAhead = ahead; st.age = 0; }
+        else if (st.pending && !kind) {   // a launch of a model not classified yet: watch it leave
+            st.age++;
+            if (st.age == 1 && ahead - st.ahead > 3.f) kind = 1;
+            else if (ahead - st.spawnAhead > 1.f) kind = 2;
+            else if (st.age > 45) kind = 3;
+            if (kind) Log("[shots] model %p is %s (%.2f units ahead after %d cycle(s))", model,
+                          kind == 1 ? "a laser" : kind == 2 ? "a missile" : "neither (ignored)", ahead - st.spawnAhead, st.age);
+        }
+        if (st.pending && kind) { if (kind == 1) shots++; else if (kind == 2) missiles++; st.pending = false; }
+        st.ahead = ahead;
+        g_shotTrack[a] = st;
     }
-    if (g_boltAhead.size() > 4096) g_boltAhead.clear();
-    if (shots && RumbleOn() && g_rumbleGuns > 0 && Vr_Active()) Vr_Haptic(1, g_rumbleGuns, 0.04f);   // right hand
+    if (g_shotTrack.size() > 4096) g_shotTrack.clear();
+    if (RumbleOn() && Vr_Active() && g_rumbleGuns > 0) {
+        if (missiles) Vr_Haptic(1, g_rumbleGuns * 2.f > 1.f ? 1.f : g_rumbleGuns * 2.f, 0.12f);   // right hand
+        else if (shots) Vr_Haptic(1, g_rumbleGuns, 0.04f);
+    }
+    if (shots) Haptics_Shot(1.f);
+    if (missiles) { Haptics_Missile(); Log("[haptics] missile launch"); }
 }
 
 static void WidenShots() {
@@ -1913,6 +1936,17 @@ static void GroundCheats() {
     static DWORD last; DWORD now = GetTickCount();
     if (now - last < 20) return;
     last = now;
+    {   // TactSuit: every effect stops when the flight is left (nav map, menus, landing, quitting)
+        static bool inFlight; bool f = now - g_lastFlightTick < 500;
+        if (inFlight && !f && g_hapticsOn) Haptics_StopAll();
+        inFlight = f;
+    }
+    {   // bHaptics calibration: Ctrl+0, or a file named 'hapticstest' in the game folder (lets tools start it)
+        static DWORD lastChk; bool go = Macro_TakeHapticsTestKey();
+        if (!go && now - lastChk > 500) { lastChk = now; char f[MAX_PATH]; sprintf_s(f, "%s\\hapticstest", g_dir);
+            if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); go = true; } }
+        if (go) { Log("[haptics] calibration requested"); Haptics_Calibrate(); }
+    }
     {   // debug: a file named 'msgtest' in the game folder shows a test message (checks the message overlay)
         static DWORD lastChk; if (now - lastChk > 500) { lastChk = now; char f[MAX_PATH]; sprintf_s(f, "%s\\msgtest", g_dir);
             if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); CheatMessage("CHEAT: TEST MESSAGE"); g_cheatMsgUntil = now + 15000; Log("[cheat] test message"); } }
@@ -2064,9 +2098,66 @@ static void WaitForSpacePrompt() {
 // Rumble when the player's ship is hit: the HUD's shield/armour display reads four shield values (16.16 at entry+0x12dc,
 // stride 2 bytes, i.e. shorts at +0x12de..+0x12e4) and four armour values (shorts at +0x12e6..+0x12ec); maxima per ship
 // type at 0x4c6950 / 0x4c6954 (+type*0x48). A drop of their total between game frames is a hit.
+// Direction of ship `att` seen from the player's ship, in ship space (azimuth + = right, elevation + = up, degrees).
+static bool AttackerDirection(int att, int player, float* az, float* el) {
+    if (att < 0 || att >= 0x95 || att == player) return false;
+    uint8_t* me = *(uint8_t**)(g_game + GAME_SHIPS + player * SHIP_STRIDE);
+    uint8_t* him = *(uint8_t**)(g_game + GAME_SHIPS + att * SHIP_STRIDE);
+    if (!me || !him) return false;
+    float a[3], b[3]; WorldPos(me, a); WorldPos(him, b);
+    const float* sm = (const float*)(me + ACTOR_T_MAT);
+    float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    float v[3]; for (int k = 0; k < 3; k++) v[k] = d[0] * sm[k*3] + d[1] * sm[k*3 + 1] + d[2] * sm[k*3 + 2];
+    float right = v[0], up = v[1], ahead = -v[2];
+    if (right * right + up * up + ahead * ahead < 1e-6f) return false;
+    *az = atan2f(right, ahead) * 57.29578f; *el = atan2f(up, sqrtf(right * right + ahead * ahead)) * 57.29578f;
+    return true;
+}
+// TactSuit events watched once per game cycle (only while a suit is in use): death, low hull, jump, landing
+static int g_hapticsHeartBelow = 35;   // armour percentage
+static void HapticsEvents() {
+    if (!g_hapticsOn || !g_game) return;
+    int player = *(int*)(g_game + GAME_PLAYER);
+    uint8_t* me = g_game + player * SHIP_STRIDE;
+    static bool wasDying; static int lastArea = -9999, lastLand = -1; static float lastHeart = -1; static DWORD lastCall, heartSent;
+    DWORD now = GetTickCount();
+    if (now - lastCall > 1000) { lastArea = -9999; lastLand = *(int*)(g_game + 0x1144); lastHeart = -1; wasDying = false; }   // a new flight
+    lastCall = now;
+    bool dying = (*(uint8_t*)(me + 0x12ee) & 0x20) != 0;
+    if (dying && !wasDying) { Haptics_Death(); Log("[haptics] death"); }
+    wasDying = dying;
+    // low armour: the four armour sides (+0x12e6..) against the ship type's maximum (0x4c6952 + type*0x48, as the restore
+    // cheat). (game+0x27896 is not a stored hull value: the game recomputes it from the armour every cycle.)
+    int type = *(int*)(me + 0x11e6) >> 16, maxA = 4 * *(const int16_t*)(0x4c6952 + type * 0x48), armour = 0;
+    for (int k = 0; k < 4; k++) armour += *(const int16_t*)(me + 0x12e6 + k * 2);
+    float frac = maxA > 0 ? (float)armour / maxA : 1.f, below = g_hapticsHeartBelow / 100.f;
+    float heart = (below > 0 && frac < below && !dying) ? 1.f - frac / below : 0.f;
+    int hull = (int)(frac * 100.f + 0.5f);
+    heart = floorf(heart * 10.f + 0.5f) / 10.f;   // in tenths: a new command only when it changes
+    if (heart != lastHeart || (heart > 0 && now - heartSent > 2000)) {   // (re-sent: effects are stopped when leaving flight)
+        if (heart != lastHeart && (heart > 0 || lastHeart > 0)) Log("[haptics] heartbeat %.1f (armour %d%%)", heart, hull);
+        Haptics_Heartbeat(heart); lastHeart = heart; heartSent = now;
+    }
+    int area = *(int16_t*)(me + 0x13b2);
+    if (lastArea != -9999 && area != lastArea) { Haptics_Jump(); Log("[haptics] jump (area %d -> %d)", lastArea, area); }
+    lastArea = area;
+    int land = *(int*)(g_game + 0x1144);
+    if (land != -1 && lastLand == -1) { Haptics_Land(); Log("[haptics] landing"); }
+    lastLand = land;
+    {   // afterburner: the game sets the speed setpoint (+0x1298) to twice the ship's max speed while it burns
+        static bool ab; static DWORD abCall;
+        if (now - abCall > 1000) ab = false;   // a new flight (effects were stopped when the last one was left)
+        abCall = now;
+        float maxSpd = *(float*)(0x4c6924 + (*(int*)(me + 0x11e6) >> 16) * 0x48), set = *(float*)(me + 0x1298);
+        bool on = maxSpd > 0 && set > maxSpd * 1.15f && !dying;
+        if (on != ab) { ab = on; Haptics_Afterburner(on); Log("[haptics] afterburner %s", on ? "on" : "off"); }
+    }
+}
+
 static void CheckHits() {
     static int lastTotal = -1, lastPlayer = -1; static DWORD lastTick;
-    if (!RumbleOn() || g_rumbleHit <= 0 || !g_game || !Vr_Active()) { lastTotal = -1; return; }
+    bool rumble = RumbleOn() && g_rumbleHit > 0 && Vr_Active();
+    if ((!rumble && !g_hapticsOn) || !g_game) { lastTotal = -1; return; }
     int player = *(int*)(g_game + GAME_PLAYER);
     const uint8_t* entry = g_game + player * SHIP_STRIDE;
     int total = 0; for (int k = 0; k < 8; k++) total += *(const int16_t*)(entry + 0x12de + k * 2);
@@ -2076,7 +2167,14 @@ static void CheckHits() {
     if (lastTotal >= 0 && player == lastPlayer && now - lastTick < 1000 && total < lastTotal && maxTotal > 0) {
         float drop = (float)(lastTotal - total) / maxTotal;           // fraction of everything the ship has
         float amp = g_rumbleHit * (0.45f + drop * 8.0f); if (amp > 1) amp = 1;
-        Vr_Haptic(2, amp, 0.12f + (drop > 0.05f ? 0.15f : 0.0f));
+        if (rumble) Vr_Haptic(2, amp, 0.12f + (drop > 0.05f ? 0.15f : 0.0f));
+        if (g_hapticsOn) {   // TactSuit: where it came from, from the attacker the damage function recorded (+0x1222)
+            float az = 0, el = 0; int att = *(const int16_t*)(entry + 0x1222);
+            bool known = AttackerDirection(att, player, &az, &el);
+            float s = 0.45f + drop * 8.0f; if (s > 1) s = 1;
+            Haptics_Hit(az, el, s);
+            Log("[haptics] hit: attacker %d, %s az %.0f el %.0f, strength %.2f", att, known ? "from" : "unknown direction:", az, el, s);
+        }
     }
     lastTotal = total; lastPlayer = player; lastTick = now;
 }   // joystick path no longer used (kept as a no-op hook)
@@ -2339,6 +2437,7 @@ extern "C" void __cdecl PostEnd() {
         RunCheats();
         CheckHits();
         DetectShots();
+        HapticsEvents();
         g_lastFlightTick = GetTickCount();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
@@ -2362,7 +2461,25 @@ extern "C" void __cdecl PostEnd() {
         {   // debug: a file named 'dumpnow' in the game folder triggers a dump (lets tools trigger it)
             static DWORD lastChk; DWORD nowt = GetTickCount();
             if (nowt - lastChk > 500) { lastChk = nowt; char f[MAX_PATH]; sprintf_s(f, "%s\\dumpnow", g_dir);
-                if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); g_dumpRequested = true; } }
+                if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) { DeleteFileA(f); g_dumpRequested = true; }
+                // tests of the vest's heartbeat and death effects: 'hulltest' drops the armour to 20% (restore with
+                // Ctrl+1), 'deathtest' destroys the player's ship through the game's damage function
+                sprintf_s(f, "%s\\hulltest", g_dir);
+                if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES && g_game) {
+                    DeleteFileA(f);
+                    uint8_t* e = g_game + *(int*)(g_game + GAME_PLAYER) * SHIP_STRIDE; int ma = *(const int16_t*)(0x4c6952 + (*(int*)(e + 0x11e6) >> 16) * 0x48);
+                    for (int k = 0; k < 4; k++) *(int16_t*)(e + 0x12e6 + k * 2) = (int16_t)(ma / 5);
+                    Log("[test] armour set to 20%% (%d of %d per side)", ma / 5, ma);
+                }
+                sprintf_s(f, "%s\\deathtest", g_dir);
+                if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES && g_game) {
+                    DeleteFileA(f);
+                    int pl = *(int*)(g_game + GAME_PLAYER); uint8_t* e = g_game + pl * SHIP_STRIDE;
+                    if (g_invincible) Log("[test] death: the invincible cheat is on, nothing happens");
+                    for (int k = 0; k < 4; k++) { *(int16_t*)(e + 0x12de + k * 2) = 0; *(int16_t*)(e + 0x12e6 + k * 2) = 1; }
+                    GameDamage(g_game, pl, 400); Log("[test] player ship destroyed");
+                }
+            }
         }
         if (g_capDir[0] && GetTickCount() - g_capOpened > 2000) FinishCapture();   // (a view without the flight HUD)
         if (g_dumpRequested && !g_capDir[0]) BeginCapture(true);
@@ -2689,7 +2806,7 @@ extern "C" HRESULT WINAPI P2VR_DirectDrawCreate(GUID* g, void** dd, IUnknown* o)
 }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_DETACH) { Macro_Shutdown(); return TRUE; }   // e.g. a recording ended by quitting the game
+    if (reason == DLL_PROCESS_DETACH) { Macro_Shutdown(); Haptics_Shutdown(); return TRUE; }   // e.g. a recording ended by quitting the game
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
         GetModuleFileNameA(h, g_dir, MAX_PATH); *strrchr(g_dir, '\\') = 0;
@@ -2716,6 +2833,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_cursorLog = GetPrivateProfileIntA("VR", "CURSOR_LOG", 0, p) != 0;
         g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
         g_rumbleJoyOff = GetPrivateProfileIntA("VR", "RUMBLE_JOYSTICK_OFF", 1, p) != 0;
+        g_hapticsHeartBelow = GetPrivateProfileIntA("VR", "BHAPTICS_HEARTBEAT_BELOW", 35, p);
         g_joyPass = GetPrivateProfileIntA("VR", "JOYSTICK_PASSTHROUGH", 1, p) != 0;
         g_cheats = GetPrivateProfileIntA("VR", "CHEATS", 1, p) != 0;
         for (int k = 0; k < CHEAT_COUNT; k++) { char key[48]; sprintf_s(key, "CHEAT_%s_BUTTON", kCheatName[k]); g_cheatButton[k] = GetPrivateProfileIntA("VR", key, 0, p); }
@@ -2752,7 +2870,11 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         Smooth_SetIdleCallback(IdleTick);
         // ground cheats, ground captures (Ctrl+F9) and the test trigger: own thread, every phase (menus, bases and films do not
         // go through the flight routines or p2den's frame pacing on the game thread)
-        CreateThread(nullptr, 0, [](LPVOID) -> DWORD { for (;;) { Sleep(20); GroundCheats(); } }, nullptr, 0, nullptr);
+        // (it also starts the bHaptics TactSuit support: loading a DLL is not allowed under DllMain's loader lock)
+        CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+            char ini[MAX_PATH]; sprintf_s(ini, "%s\\p2vr.ini", g_dir); Haptics_Init(ini, g_dir, Log);
+            for (;;) { Sleep(20); GroundCheats(); }
+        }, nullptr, 0, nullptr);
         Macro_Start(g_dir, GetPrivateProfileIntA("VR", "AUTOPLAY", 0, p) != 0, Log);
     }
     return TRUE;

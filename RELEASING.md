@@ -26,6 +26,13 @@ installer from `https://github.com/SPD13/privateer2-vr/releases/latest/download/
 
 A test build without publishing: Actions > release > *Run workflow*. The files are in the run's artifacts.
 
+**bHaptics credentials.** TactSuit support needs a bHaptics SDK API key and workspace ID (bHaptics Developer Portal). They are
+repository secrets `BHAPTICS_SDK_KEY` and `BHAPTICS_WORKSPACE_ID`, passed to `src\build.bat` as `P2VR_BHAPTICS_KEY` /
+`P2VR_BHAPTICS_WORKSPACE` and compiled into the release DLL; they are never in the source. Without them the build works and the
+vest support is off. For local builds, put them in the game's `p2vr.ini` as `BHAPTICS_API_KEY` / `BHAPTICS_WORKSPACE_ID`.
+The SDK DLL itself is not in the release: the launcher downloads it (pinned commit, SHA-256 checked) for players with bHaptics
+Player installed; `scripts/get_bhaptics.ps1` fetches the same files for development.
+
 ## Build locally
 
 ```

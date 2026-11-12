@@ -13,6 +13,7 @@ What it does:
 - **A cockpit HUD around you.** The HUD is split into panels on a sphere around your head, each angled towards you: radar, shields, target display, comms, missiles and velocity. Their placement is configurable.
 - **Markers in 3D.** The crosshair sits on the ship's gun line. Target brackets and the missile-lock reticle are attached to the target at its real distance. Direction arrows stay on the HUD glass.
 - **Fly with the VR controllers**, or a joystick / HOTAS configured with the game's own tool. You get controller rumble when firing or hit.
+- **bHaptics TactSuit support:** feel hits from the direction they come from, your guns, missiles, the afterburner and jumps. See [bHaptics TactSuit](#bhaptics-tactsuit).
 - **Menus, bases, the PAD and the FMV films** play on a large virtual screen. You point and click with the controller.
 - **Cheat codes:**
   - eight optional cheats: restore shields and armour, destroy the target or all enemies, +100,000 credits, invincibility, jump straight to the destination, land now, and 2x fast forward;
@@ -34,6 +35,7 @@ No game files are included: you need your own copy of the game.
 - **Windows 10 or 11** (64-bit) and a PC that runs SteamVR.
 - **SteamVR** and a PC VR headset with two motion controllers. The mod was developed on the Steam Frame; Valve Index, Meta Quest (Link / Steam Link) and other SteamVR headsets should work.
 - *Optional:* a joystick or HOTAS.
+- *Optional:* a bHaptics TactSuit with **bHaptics Player** (tested with the TactSuit X40).
 
 ## Install
 
@@ -206,6 +208,23 @@ If something doesn't work or looks wrong, a bug report with a capture of the pro
 
 The zip contains no personal files: only the captured images, the mod's logs and settings, and the system information listed above.
 
+## bHaptics TactSuit
+
+With a bHaptics TactSuit and **bHaptics Player** running, you feel the flight on your body:
+
+- **Hits** buzz on the side the attacker is on: front or back, left or right, high or low. Bigger hits are stronger.
+- **Your guns** tap your chest at each shot. A **missile** launch is a strong thump.
+- The **afterburner** rumbles on your lower back while it burns.
+- A **jump** sends a wave from your chest to your back; **landing** a soft wave up from the waist.
+- A **heartbeat** warns that your armour is low, and the vest bursts and fades when your ship is destroyed.
+
+Setup:
+1. Install [bHaptics Player](https://www.bhaptics.com/software/player/), pair the suit, and start bHaptics Player before the game.
+2. Install or update the mod with the launcher. When it finds bHaptics Player, it adds the bHaptics support files (`bhaptics_library.dll`, from bHaptics' own SDK). If you install bHaptics Player later, **Play in VR** adds them.
+3. In bHaptics Player, turn off the audio-to-haptics feature for this game, or its vibrations mix with the mod's.
+
+**Ctrl+0** plays a test sequence on the vest. Strengths and the heartbeat threshold are in `p2vr.ini` ([SETTINGS.md](SETTINGS.md#bhaptics-tactsuit)). Without bHaptics Player nothing is downloaded, loaded or run.
+
 ## HUD Positioning
 
 ![HUD panels on a sphere around the player](docs/hud-positioning.png)
@@ -240,6 +259,7 @@ All options of the mod are in **`p2vr.ini`**, in the game folder (the launcher's
 - **Menus and films:** size and distance of the virtual screen.
 - **VR controllers and joystick:** deadzone, inversion, gains, joystick pass-through, keys sent by each command.
 - **Rumble:** on/off and strength for shots and hits.
+- **bHaptics TactSuit:** on/off and the strength of each vest effect.
 
 Every setting, its default and its effect is explained in **[SETTINGS.md](SETTINGS.md)**; the installer also places it in the game folder as `P2VR-SETTINGS.md`. The defaults are always available in `p2vr.default.ini`.
 
@@ -303,3 +323,4 @@ Pushing a tag `vX.Y.Z` builds and publishes a release: the mod archive `privatee
 - **Privateer 2: The Darkening** © Electronic Arts / Origin Systems. This mod is a fan project, not affiliated with or endorsed by them. You need your own copy of the game; no game files are distributed. The installer artwork uses the game's own art.
 - **The enhancement layer** (`p2den.dll`) is part of the 30th Anniversary Edition.
 - The OpenXR loader is © The Khronos Group (Apache 2.0).
+- **bHaptics TactSuit support** uses the bHaptics SDK (`bhaptics_library.dll`), Copyright bHaptics Inc. All rights reserved, under the [bHaptics SDK agreement](https://bhaptics.gitbook.io/license-sdk/). It is downloaded from bHaptics' SDK repository only for players with bHaptics Player installed. This mod is not affiliated with or endorsed by bHaptics.
