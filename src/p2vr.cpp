@@ -1930,12 +1930,30 @@ static void DoCheat(int which) {
         break; }
     }
 }
+// Alt+X in flight: the game pauses and draws "ARE YOU SURE YOU WANT TO QUIT (Y/N)" into its picture after the HUD layer
+// that the headset gets, so in VR the question was missing. No new space images can be rendered during the pause (the
+// game thread waits in a loop the mod does not hook), and a frozen view shows its edges when the head turns: the headset
+// shows a dark pause screen with its own copy of the question (Vr_ShowMessage(2)) until Y, N or Esc is pressed.
+static void QuitQuestion(DWORD now) {
+    static DWORD seenAltX; static bool asking;
+    DWORD altX = Macro_AltXTick();
+    bool flight = now - g_lastFlightTick < 500;   // (when Alt+X is pressed; the game then pauses)
+    if (altX != seenAltX) { seenAltX = altX;
+        if (flight && !asking) { asking = true; Vr_ShowMessage(2); Log("[vr] Alt+X in flight: quit question shown"); } }
+    if (!asking) return;
+    bool answered = (GetAsyncKeyState('Y') & 0x8000) || (GetAsyncKeyState('N') & 0x8000) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
+    if (answered || now - altX > 120000) {
+        asking = false; Vr_ShowMessage(0);
+        Log("[vr] quit question closed (%s)", answered ? "answered" : "timed out");
+    }
+}
 // On the ground (bases, menus, PAD: no flight frame for 0.5 s) only "get cash" and "fast forward" apply; run from the idle
 // callback, which p2den's frame pacing calls on the game thread in every phase. The other cheat keys are ignored there.
 static void GroundCheats() {
     static DWORD last; DWORD now = GetTickCount();
     if (now - last < 20) return;
     last = now;
+    QuitQuestion(now);
     {   // TactSuit: every effect stops when the flight is left (nav map, menus, landing, quitting)
         static bool inFlight; bool f = now - g_lastFlightTick < 500;
         if (inFlight && !f && g_hapticsOn) Haptics_StopAll();
@@ -2281,9 +2299,12 @@ static void NoteDialogDraw(uint32_t ret, int id, void* shapes, const int* xy, co
     int ox = view ? view[1] : 0, oy = view ? view[2] : 0;
     int x0 = ox + xy[0] + e[2], y0 = oy + xy[1] + e[3], x1 = ox + xy[0] + e[4] + 1, y1 = oy + xy[1] + e[5] + 1;
     if (now - last > 500) {   // a new dialog
-        fromFlight = now - g_lastFlightTick < 3000;
-        Log("[vr] dialog sprite %d at (%d,%d) view (%d,%d) bounds (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d), %s", id, xy[0], xy[1], ox, oy,
-            e[2], e[3], e[4], e[5], x0, y0, x1, y1, fromFlight ? "over flight: shown on the HUD glass" : "not from flight");
+        // This full-screen sprite is the main menu (Load / New / Exit), shown after the flight ends (quit with Alt+X + Y,
+        // or a death). It belongs on the flat screen: on the HUD glass it is wider than the view. The quit question itself
+        // ("ARE YOU SURE YOU WANT TO QUIT (Y/N)") is text in the flight picture, see QuitQuestion.
+        fromFlight = false;
+        Log("[vr] dialog sprite %d at (%d,%d) view (%d,%d) bounds (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d), flat screen (last flight frame %u ms ago)",
+            id, xy[0], xy[1], ox, oy, e[2], e[3], e[4], e[5], x0, y0, x1, y1, now - g_lastFlightTick);
     }
     last = now;
     if (!fromFlight) return;

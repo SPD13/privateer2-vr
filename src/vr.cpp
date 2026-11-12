@@ -451,8 +451,8 @@ void Vr_SetFlightDialog(int x0, int y0, int x1, int y1) {
 }
 static HWND GameWnd();
 // Message panel shown instead of the (frozen) game while a desktop tool of the game is open (p2den's Alt+J joystick setup)
-static Swap msgSc[2]; static bool msgReady[2]; static const int MSG_W = 1280, MSG_H = 200;
-static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt
+static Swap msgSc[3]; static bool msgReady[3]; static const int MSG_W = 1280, MSG_H = 200;
+static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt, 2 = quit question (Alt+X in flight)
 void Vr_ShowMessage(int which) { InterlockedExchange(&s_msgShow, which); }
 // cursor offset of the current 2D screen (PAD, nav map): reported while that cursor is drawn, forgotten 1 s after
 static volatile LONG s_curOff, s_curOffTick;
@@ -761,6 +761,7 @@ static bool FinaliseEyeTarget(const XrView v[2]) {
     if (s_panelsOn && !MakeSwap(panelSc, HUD_PX_W, HUD_PX_H)) s_panelsOn = false;
     MakeMessage(0, "Use the desktop to configure the joystick");
     MakeMessage(1, "Entering Space in VR.\nPress the fire button to continue");
+    MakeMessage(2, "Are you sure you want to quit?\nY = yes, N = no");
     if (MakeSwap(beamSc, 8, 64)) {   // beam colour (premultiplied, semi-transparent cyan)
         uint32_t i = 0; XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
         if (XR_SUCCEEDED(xrAcquireSwapchainImage(beamSc.sc, &ai, &i))) {
@@ -1132,7 +1133,7 @@ static void FrameLoop() {
         XrCompositionLayerQuad beam = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         XrCompositionLayerQuad tip = {XR_TYPE_COMPOSITION_LAYER_QUAD};
         bool toolOpen = targetDone && DesktopToolOpen();
-        int msgSlot = toolOpen ? 0 : (targetDone && s_msgShow == 1) ? 1 : -1;
+        int msgSlot = toolOpen ? 0 : (targetDone && (s_msgShow == 1 || s_msgShow == 2)) ? (int)s_msgShow : -1;
         if (targetDone && sessState == XR_SESSION_STATE_FOCUSED && msgSlot < 0) {
             if (dialog && flight) UpdatePointer(fs.predictedDisplayTime, false, s_hudDist, s_hudWidth, s_hudY);   // the dialog on the glass
             else UpdatePointer(fs.predictedDisplayTime, flight, s_screenDist, s_screenWidth, 0.0f);
@@ -1273,7 +1274,9 @@ static void FrameLoop() {
             }
         }
         XrCompositionLayerQuad msg = {XR_TYPE_COMPOSITION_LAYER_QUAD};
-        if (msgSlot >= 0 && msgReady[msgSlot]) {   // game frozen (desktop tool) or waiting (entering space): world-fixed message only
+        // game frozen (desktop tool), waiting (entering space) or paused on its quit question (Alt+X: no new space images
+        // can be rendered, and a frozen view shows its edges when the head turns): world-fixed message only
+        if (msgSlot >= 0 && msgReady[msgSlot]) {
             layers.clear();
             msg.space = localSpace; msg.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             msg.subImage.swapchain = msgSc[msgSlot].sc; msg.subImage.imageRect = {{0, 0}, {MSG_W, MSG_H}};

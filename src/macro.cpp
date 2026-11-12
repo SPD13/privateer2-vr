@@ -159,6 +159,8 @@ static void StartReplay() {
 
 static volatile LONG s_hapticsTestKey;   // Ctrl+0 pressed (bHaptics calibration)
 static volatile LONG s_cheatKeys;   // cheat hotkeys (Ctrl+1..5) pressed, see Macro_TakeCheatKeys
+static volatile LONG s_altXTick;    // last Alt+X press (the game's "quit? (Y/N)" follows); the game's own polling can miss it
+DWORD Macro_AltXTick() { return (DWORD)s_altXTick; }
 static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
         auto* k = (KBDLLHOOKSTRUCT*)lp;
@@ -187,6 +189,8 @@ static LRESULT CALLBACK KbHook(int code, WPARAM wp, LPARAM lp) {
             static DWORD lastNote; if (GetTickCount() - lastNote > 5000) { lastNote = GetTickCount(); Log("[macro] real keyboard input ignored during replay (Ctrl+F3 aborts)"); }
             return 1;
         }
+        if (!up && k->vkCode == 'X' && ((k->flags & LLKHF_ALTDOWN) || (GetAsyncKeyState(VK_MENU) & 0x8000)) && GameHasFocus())
+            InterlockedExchange(&s_altXTick, (LONG)GetTickCount());
         if (!injected && ctrl && GameHasFocus() && k->vkCode == '0') {   // Ctrl+0: bHaptics calibration
             if (!up) InterlockedExchange(&s_hapticsTestKey, 1);
             return 1;

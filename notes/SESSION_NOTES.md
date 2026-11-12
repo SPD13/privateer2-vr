@@ -118,11 +118,11 @@ Ship slots for other ships: `0x1D..0x94` (29..148).
   - diary (Alt+D), options (Alt+O) and hotkeys (Alt+H): three blocks, 0x45C592..0x45CC90, 0x45D08A..0x45D526 and 0x45F400..0x45F622.
 - To find a new screen's call sites, log each distinct `ret` in `NotePostHudDraw` once, then open the screen from flight.
 - When the diary opens, the game runs one more plain flight cycle (only 0x44C265) between two diary frames. With the fade this is just a short dim, not a wrong frame.
-- **Alt+X quit dialog over flight:** the game pauses (no screen frames for ~1.7 s), then draws the dialog as one full-screen sprite (id 1, 640×480) from **0x42207F**, with its cursor at **0x422626**. Instead of switching to flat and back, the headset stays in flight:
-  - `NoteDialogDraw` (`p2vr.cpp`) reports the dialog if it opened within 3 s of the last flight frame; the cursor redraws keep it alive.
-  - `vr.cpp` keeps `flight` true while `Vr_SetFlightDialog` was called less than 400 ms ago. Space, HUD and panels stay frozen (`UpdateScreen` is skipped).
-  - `UpdateDialog` draws the dialog rectangle of the screen frame, opaque (`psScreen` with `keyOn` 0 and `map` = crop), into `dlgSc`, shown as a quad on the HUD glass.
-  - The VR pointer and beam aim at the glass: `UpdatePointer(..., s_hudDist, s_hudWidth, s_hudY)`. The flight buttons send nothing, since their keys go out from the paused game cycle.
+- **Alt+X in flight (corrected Nov 12):** the game pauses and draws **"ARE YOU SURE YOU WANT TO QUIT (Y/N)"** as text in the middle of its picture, after the HUD layer the headset gets. It is not a window (no new window of the process) and not in the HUD capture; only the desktop showed it.
+  - The full-screen sprite (id 1, 640×480) from **0x42207F**, cursor **0x422626**, is the **main menu** (Load / New / Exit) that follows Y or a death. It was wrongly taken for the quit dialog and put on the HUD glass, where it is wider than the view. `NoteDialogDraw` now always leaves it to the flat screen (`fromFlight = false`); `Vr_SetFlightDialog` / `UpdateDialog` / `dlgSc` in `vr.cpp` are unused.
+  - Alt+X is caught by the keyboard hook (`Macro_AltXTick`, `macro.cpp`): `GetAsyncKeyState` polling missed quick presses.
+  - `QuitQuestion` (`p2vr.cpp`) shows `Vr_ShowMessage(2)`: a dark pause screen with "Are you sure you want to quit? Y = yes, N = no", world-fixed like the entering-space prompt, until Y, N or Esc.
+  - **No eye renders during this pause:** the game thread waits in a loop that does not call the idle callback, so a frozen space view showed black beyond its edges when the head turned. Letting `IdleTick` render when no cycle is due did not help (never called in the pause) and **crashed the game after Y** (3D renders on the game-over / menu path). Do not render from outside a flight cycle.
 - **Eye-staleness fallback:** "no eye render for 300 ms" now only switches to flat while screen frames keep arriving (`s_lastScreenTick` more than 100 ms after the last eye render). During a pause with no frames, the frozen space view stays.
 
 The shown mode is `flight = targetDone && eyes rendered < 300 ms ago && screenFlight`.
