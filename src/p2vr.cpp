@@ -101,6 +101,12 @@ static bool  g_dust = true, g_flare = true;
 static int   g_actorLog = 0;
 static float g_laserWiden = 3.0f, g_laserWidenDist = 60.0f;
 static bool  g_rumble = true; static float g_rumbleGuns = 0.35f, g_rumbleHit = 0.9f;   // controller vibration
+// RUMBLE_JOYSTICK_OFF: no vibration when the flight was started with the joystick (or mouse) at the "Entering Space" prompt,
+// so VR controllers put down on a table stay still; started with the VR controller, it rumbles. Without the prompt, the
+// game's control method decides (joystick or mouse: no rumble).
+static bool  g_rumbleJoyOff = true; static volatile bool g_joyFlying;
+static void SetFlyingWith(bool joystick, const char* why);
+static bool RumbleOn() { return g_rumble && !(g_rumbleJoyOff && g_joyFlying); }
 static bool  g_retDynamic = false;
 static bool  g_retInEyes = true;     // crosshair + lead indicator drawn into the 3D image at infinity (ships occlude them)
 static float g_retFracP2 = 0.20f;    // crosshair region (fraction of the HUD width), same as RETICLE_SIZE
@@ -502,6 +508,35 @@ static MovedActor g_moved[128]; static int g_nMoved;
 
 static bool IsBoltModel(void* m) { for (int i = 0; i < g_nBoltModels; i++) if (g_boltModels[i] == m) return true; return false; }
 
+// Gun rumble, once per game cycle (real positions, not the smoothed renders): a shot is a bolt at the muzzle that was not
+// visible, or was further ahead, in the previous cycle. The game reuses its bolt actors: a bolt that finished its flight
+// can be put back at the guns while still visible, so "became visible" alone misses most shots of a burst.
+static std::unordered_map<uint8_t*, float> g_boltAhead;   // per actor: distance ahead of the ship last cycle, < -1e8 = not a bolt
+static void DetectShots() {
+    uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
+    if (!game || !wfg) return;
+    uint8_t* ship = *(uint8_t**)(game + GAME_SHIPS + *(int*)(game + GAME_SHIPIDX) * SHIP_STRIDE);
+    if (!ship) return;
+    const float* sm = (const float*)(ship + ACTOR_T_MAT); const float* sp = sm + 9;
+    int shots = 0;
+    for (uint8_t* a = *(uint8_t**)(wfg + 8); a; a = *(uint8_t**)a) {
+        if (a == ship || *(uint8_t**)(a + 0xC) != wfg) continue;
+        void* model = *(void**)(a + 0x18);
+        bool bolt = a[0x12] == 1 && model && IsBoltModel(model);
+        auto it = g_boltAhead.find(a); float prev = it == g_boltAhead.end() ? -1e9f : it->second;
+        if (!bolt) { if (it != g_boltAhead.end()) it->second = -1e9f; continue; }
+        const float* t = (const float*)(a + ACTOR_T_MAT) + 9;
+        float d[3] = {t[0] - sp[0], t[1] - sp[1], t[2] - sp[2]};
+        float v[3]; for (int k = 0; k < 3; k++) v[k] = d[0] * sm[k*3] + d[1] * sm[k*3 + 1] + d[2] * sm[k*3 + 2];
+        float ahead = -v[2];
+        bool atGuns = fabsf(v[0]) < 4.f && fabsf(v[1]) < 3.f && ahead > -0.5f && ahead < 6.f;
+        if (atGuns && (prev < -1e8f || prev > ahead + 2.f)) shots++;   // new, or put back at the guns
+        g_boltAhead[a] = ahead;
+    }
+    if (g_boltAhead.size() > 4096) g_boltAhead.clear();
+    if (shots && RumbleOn() && g_rumbleGuns > 0 && Vr_Active()) Vr_Haptic(1, g_rumbleGuns, 0.04f);   // right hand
+}
+
 static void WidenShots() {
     g_nMoved = 0;
     uint8_t* game = g_game; uint8_t* wfg = *(uint8_t**)ADDR_WORLD_FG;
@@ -523,9 +558,6 @@ static void WidenShots() {
             g_boltModels[g_nBoltModels++] = model;
             Log("[shots] learned shot model %p (spawned at %.2f %.2f %.2f)", model, v[0], v[1], v[2]);
         }
-        if (visible && !was && g_rumble && g_rumbleGuns > 0 && IsBoltModel(model) &&
-            fabsf(v[0]) < 4.f && fabsf(v[1]) < 3.f && v[2] < 0.5f && v[2] > -6.f)
-            Vr_Haptic(1, g_rumbleGuns, 0.04f);                      // our shot just left the guns: right hand
         was = visible;
         if (g_laserWiden == 1.0f || !visible || !IsBoltModel(model) || g_nMoved >= 128) continue;
         float ahead = -v[2];
@@ -1997,26 +2029,34 @@ static void ReadFireMaps() {
     }
     Log("[vr] fire buttons: mouse %d%d%d%d%d, %zu joystick(s)", g_fireMouse[0], g_fireMouse[1], g_fireMouse[2], g_fireMouse[3], g_fireMouse[4], g_fireJoys.size());
 }
-static bool FireDown() {
+static void SetFlyingWith(bool joystick, const char* why) {
+    g_joyFlying = joystick;
+    Log("[ctl] flying with the %s (%s)%s", joystick ? "joystick" : "VR controllers", why,
+        g_rumbleJoyOff && g_rumble ? (joystick ? ": controller rumble off" : ": controller rumble on") : "");
+}
+enum { FIRE_NONE, FIRE_MOUSE, FIRE_VR, FIRE_JOYSTICK };
+static int FireDown() {   // which device holds a fire button (FIRE_NONE: none)
     if (!g_fireMapsRead) ReadFireMaps();
-    static const int vks[5] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
-    for (int i = 0; i < 5; i++) if (g_fireMouse[i] && (GetAsyncKeyState(vks[i]) & 0x8000)) return true;
     VrControls c = {};
-    if (Vr_GetControls(&c)) for (int i = 0; i < kVrCommandCount; i++) if (!strcmp(kVrCommands[i].action, "fire_guns") && ((c.buttons >> i) & 1)) return true;
-    for (auto& fj : g_fireJoys) { JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS}; if (joyGetPosEx(fj.id, &ji) == JOYERR_NOERROR && (ji.dwButtons & fj.mask)) return true; }
-    return false;
+    if (Vr_GetControls(&c)) for (int i = 0; i < kVrCommandCount; i++) if (!strcmp(kVrCommands[i].action, "fire_guns") && ((c.buttons >> i) & 1)) return FIRE_VR;
+    for (auto& fj : g_fireJoys) { JOYINFOEX ji = {sizeof ji, JOY_RETURNBUTTONS}; if (joyGetPosEx(fj.id, &ji) == JOYERR_NOERROR && (ji.dwButtons & fj.mask)) return FIRE_JOYSTICK; }
+    static const int vks[5] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+    for (int i = 0; i < 5; i++) if (g_fireMouse[i] && (GetAsyncKeyState(vks[i]) & 0x8000)) return FIRE_MOUSE;
+    return FIRE_NONE;
 }
 static void WaitForSpacePrompt() {
     Log("[vr] entering space: waiting for the fire button");
     g_fireMapsRead = false;   // pick up joysticks / mappings changed since the last time
     Vr_ShowMessage(1);
-    int phase = 0;   // 0: wait until nothing is held, 1: wait for a press, 2: wait for its release
+    int phase = 0, pressedWith = FIRE_NONE;   // 0: wait until nothing is held, 1: wait for a press, 2: wait for its release
     while (phase < 3 && Vr_Active()) {
         MSG m; PeekMessageA(&m, nullptr, 0, 0, PM_NOREMOVE);   // keeps the window responsive (no "not responding")
-        bool down = FireDown();
-        if (phase == 0 && !down) phase = 1; else if (phase == 1 && down) phase = 2; else if (phase == 2 && !down) phase = 3;
+        int src = FireDown(); bool down = src != FIRE_NONE;
+        if (phase == 0 && !down) phase = 1; else if (phase == 1 && down) { phase = 2; pressedWith = src; } else if (phase == 2 && !down) phase = 3;
         Sleep(15);
     }
+    if (pressedWith != FIRE_NONE)   // the device that started the flight decides the controller rumble
+        SetFlyingWith(pressedWith != FIRE_VR, pressedWith == FIRE_VR ? "fire pressed on a VR controller" : pressedWith == FIRE_JOYSTICK ? "fire pressed on the joystick" : "fire pressed on the mouse");
     Vr_ShowMessage(0);
     Log("[vr] entering space: continue");
 }
@@ -2026,7 +2066,7 @@ static void WaitForSpacePrompt() {
 // type at 0x4c6950 / 0x4c6954 (+type*0x48). A drop of their total between game frames is a hit.
 static void CheckHits() {
     static int lastTotal = -1, lastPlayer = -1; static DWORD lastTick;
-    if (!g_rumble || g_rumbleHit <= 0 || !g_game || !Vr_Active()) { lastTotal = -1; return; }
+    if (!RumbleOn() || g_rumbleHit <= 0 || !g_game || !Vr_Active()) { lastTotal = -1; return; }
     int player = *(int*)(g_game + GAME_PLAYER);
     const uint8_t* entry = g_game + player * SHIP_STRIDE;
     int total = 0; for (int k = 0; k < 8; k++) total += *(const int16_t*)(entry + 0x12de + k * 2);
@@ -2290,10 +2330,15 @@ extern "C" void __cdecl PostEnd() {
     if (idx == 1) {
         g_frames++;
         Smooth_SetGameThread();
-        if (g_newSpaceSession) { g_newSpaceSession = false; if (g_spacePrompt && Vr_Active()) WaitForSpacePrompt(); }   // mission start only
+        if (g_newSpaceSession) {   // mission start only
+            g_newSpaceSession = false;
+            if (g_spacePrompt && Vr_Active()) WaitForSpacePrompt();   // (also decides the controller rumble)
+            else SetFlyingWith((*(uint8_t*)ADDR_CTRL_METHOD & 3) != 0, "game control method");
+        }
         UpdateControlMode();
         RunCheats();
         CheckHits();
+        DetectShots();
         g_lastFlightTick = GetTickCount();
         // Hotkeys (Ctrl + F-key, edge-triggered): F5/F6/F7 = mode 0/1/2, F8 = toggle wide FOV,
         // F9 = dump, F10/F11 = IPD x0.5 / x2
@@ -2670,6 +2715,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
         g_cursorFix = GetPrivateProfileIntA("VR", "CURSOR_FIX", 1, p) != 0;
         g_cursorLog = GetPrivateProfileIntA("VR", "CURSOR_LOG", 0, p) != 0;
         g_rumble = GetPrivateProfileIntA("VR", "RUMBLE", 1, p) != 0;
+        g_rumbleJoyOff = GetPrivateProfileIntA("VR", "RUMBLE_JOYSTICK_OFF", 1, p) != 0;
         g_joyPass = GetPrivateProfileIntA("VR", "JOYSTICK_PASSTHROUGH", 1, p) != 0;
         g_cheats = GetPrivateProfileIntA("VR", "CHEATS", 1, p) != 0;
         for (int k = 0; k < CHEAT_COUNT; k++) { char key[48]; sprintf_s(key, "CHEAT_%s_BUTTON", kCheatName[k]); g_cheatButton[k] = GetPrivateProfileIntA("VR", key, 0, p); }

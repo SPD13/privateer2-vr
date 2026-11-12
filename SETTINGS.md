@@ -152,6 +152,7 @@ Every game command is a SteamVR action, remappable in **SteamVR > Settings > Con
 | `RUMBLE` | `1` | Controller vibration on/off. |
 | `RUMBLE_GUNS` | `0.35` | Strength (0..1) of the short right-hand pulse for each gun shot leaving your ship. `0` = none. |
 | `RUMBLE_HIT` | `0.9` | Strength (0..1) of the both-hands pulse when your ship takes damage (shields or armour drop); bigger hits rumble harder and longer. `0` = none. |
+| `RUMBLE_JOYSTICK_OFF` | `1` | No controller vibration when you fly with a joystick, so VR controllers put down (e.g. on the table) stay still. The button you press at the *Entering Space in VR* prompt decides, for the whole flight: fire on a **VR controller** = rumble on; fire on the **joystick** (or the mouse) = rumble off. Without the prompt (`SPACE_PROMPT=0`), the game's control method decides: joystick or mouse = rumble off. `0` = rumble whatever you fly with. |
 
 The rumble outputs are also SteamVR actions (`rumble_left`, `rumble_right`), so they can be reassigned in the SteamVR binding screen.
 
