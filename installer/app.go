@@ -672,6 +672,11 @@ func (a *app) play(vr, closeAfter bool) {
 			} else if msg != "" {
 				logf("launch: %s", msg)
 			}
+			if changed, err := refreshOldDefaults(g.Path); err != nil { // an update done by an older launcher skipped this
+				logf("launch: settings: %v", err)
+			} else if len(changed) > 0 {
+				logf("launch: settings still at an earlier version's default updated: %s", strings.Join(changed, ", "))
+			}
 			if !steamVRRunning() {
 				set("Starting SteamVR…")
 				startSteamVR()

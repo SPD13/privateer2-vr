@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,6 +46,37 @@ func TestOldDefaultsAgainstShippedIni(t *testing.T) {
 				t.Errorf("%s: old default %s is the current default", k, o)
 			}
 		}
+	}
+}
+
+// "Play in VR" after an update done by an older launcher: the game folder's p2vr.ini still has old defaults, and
+// p2vr.default.ini is the new version's. Old defaults are updated once; a second run changes nothing.
+func TestRefreshOldDefaults(t *testing.T) {
+	dir := t.TempDir()
+	if ch, err := refreshOldDefaults(dir); err != nil || ch != nil {
+		t.Fatalf("empty folder: %v %v", ch, err)
+	}
+	fresh, err := os.ReadFile("../dist/p2vr.ini")
+	if err != nil {
+		t.Skip("dist/p2vr.ini not found")
+	}
+	old := []byte("[VR]\r\nPANEL_VELOCITY=236,4,406,58, 0,24, 0.36\r\nINVERT_PITCH=1\r\n")
+	if p := os.Getenv("P2VR_TEST_INI"); p != "" {
+		old, _ = os.ReadFile(p) // a copy of the player's real file
+	}
+	os.WriteFile(filepath.Join(dir, defaultsFile), fresh, 0o644)
+	os.WriteFile(filepath.Join(dir, settingsFile), old, 0o644)
+	ch, err := refreshOldDefaults(dir)
+	t.Logf("changed: %v", ch)
+	if err != nil || len(ch) == 0 {
+		t.Fatalf("nothing updated: %v", err)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, settingsFile))
+	if !strings.Contains(string(got), "PANEL_VELOCITY=236,0,406,58") || strings.Contains(string(got), "236,4,") {
+		t.Fatalf("PANEL_VELOCITY not updated")
+	}
+	if ch, _ := refreshOldDefaults(dir); ch != nil {
+		t.Fatalf("second run changed %v", ch)
 	}
 }
 

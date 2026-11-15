@@ -310,6 +310,29 @@ func updateOldDefaults(old, fresh string) (string, []string) {
 	return strings.Join(lines, "\n"), changed
 }
 
+// refreshOldDefaults applies updateOldDefaults to the game folder's p2vr.ini, against the p2vr.default.ini of the
+// installed version. Run on "Play in VR" too: an update done by an older launcher (which replaces itself and restarts
+// only at the end) does not have this step. Returns the settings it changed.
+func refreshOldDefaults(dir string) ([]string, error) {
+	fresh, err := os.ReadFile(filepath.Join(dir, defaultsFile))
+	if err != nil {
+		return nil, nil // (installed by a version without p2vr.default.ini: nothing to compare with)
+	}
+	path := filepath.Join(dir, settingsFile)
+	old, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil
+	}
+	updated, changed := updateOldDefaults(string(old), string(fresh))
+	if len(changed) == 0 {
+		return nil, nil
+	}
+	if err := writeFile(path, []byte(updated)); err != nil {
+		return nil, err
+	}
+	return changed, nil
+}
+
 func mergeSettings(old, fresh, version string) (string, int) {
 	have := map[string]bool{}
 	lastSection := ""
