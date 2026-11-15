@@ -126,6 +126,7 @@ static float g_dustScale = 1.0f;     // dust speck size multiplier
 void Capture_SetMirror(const uint8_t* scene, int w, int h, const uint8_t* palRGBX);
 bool Capture_GetPalette(uint8_t out[1024]);
 bool Capture_GetHudRGB(uint8_t* out);
+DWORD Capture_LastPresentTick();
 static char  g_dir[MAX_PATH];
 
 static void Log(const char* fmt, ...) {
@@ -1945,17 +1946,46 @@ static void DoCheat(int which) {
 // that the headset gets, so in VR the question was missing. No new space images can be rendered during the pause (the
 // game thread waits in a loop the mod does not hook), and a frozen view shows its edges when the head turns: the headset
 // shows a dark pause screen with its own copy of the question (Vr_ShowMessage(2)) until Y, N or Esc is pressed.
+// On the ground (bases, PAD, menus) the same: the question reaches the desktop but not p2den's presented picture, and
+// p2den, which presents every frame there, stops until the answer (measured: last frame 31 ms after Alt+X, frames again
+// with the Y press 6.2 s later). Alt+X is not a question on every screen, so on the ground the pause screen shows only
+// when frames were coming at Alt+X and stop within 1.5 s, and goes only when frames come again.
 static void QuitQuestion(DWORD now) {
-    static DWORD seenAltX; static bool asking;
+    static DWORD seenAltX, pendingSince; static bool asking, ground;
     DWORD altX = Macro_AltXTick();
     bool flight = now - g_lastFlightTick < 500;   // (when Alt+X is pressed; the game then pauses)
-    if (altX != seenAltX) { seenAltX = altX;
-        if (flight && !asking) { asking = true; Vr_ShowMessage(2); Log("[vr] Alt+X in flight: quit question shown"); } }
+    DWORD presentAge = now - Capture_LastPresentTick();
+    if (altX && now - altX < 15000) {   // diagnostics: frame gaps and answer keys after Alt+X (t = ms since Alt+X)
+        static bool gap; static DWORD gapStart; static bool keyWas[3];
+        if (!gap && presentAge >= 150) { gap = true; gapStart = now - presentAge; Log("[quit-diag] t %u: frames stop (last frame t %d)", now - altX, (int)(gapStart - altX)); }
+        else if (gap && presentAge < 150) { gap = false; Log("[quit-diag] t %u: frames again after %u ms", now - altX, now - presentAge - gapStart); }
+        static const int keys[3] = {'Y', 'N', VK_ESCAPE}; static const char* kn[3] = {"Y", "N", "Esc"};
+        for (int i = 0; i < 3; i++) { bool d = (GetAsyncKeyState(keys[i]) & 0x8000) != 0;
+            if (d != keyWas[i]) { keyWas[i] = d; Log("[quit-diag] t %u: %s %s (frames %s)", now - altX, kn[i], d ? "down" : "up", gap ? "stopped" : "running"); } }
+    }
+    if (altX != seenAltX) { seenAltX = altX; Log("[quit-diag] Alt+X at t 0 (tick %lu), %s", altX % 1000000, flight ? "flight" : "ground");
+        if (!asking) {
+            if (flight) { asking = true; ground = false; Vr_ShowMessage(2); Log("[vr] Alt+X in flight: quit question shown"); }
+            else if (presentAge < 250) pendingSince = now;   // (frames were coming: a stop now means the question)
+            else Log("[vr] Alt+X on the ground: no frames before it (%u ms), no question shown", presentAge);
+        }
+    }
+    if (pendingSince && !asking) {   // ground: wait for the pause
+        if (presentAge >= 300) {
+            asking = true; ground = true; pendingSince = 0; Vr_ShowMessage(2);
+            Log("[vr] Alt+X on the ground: no frame for %u ms, quit question shown (t %u)", presentAge, now - altX);
+        } else if (now - pendingSince > 1500) {
+            pendingSince = 0; Log("[vr] Alt+X on the ground: frames kept coming, no question");
+        }
+    }
     if (!asking) return;
-    bool answered = (GetAsyncKeyState('Y') & 0x8000) || (GetAsyncKeyState('N') & 0x8000) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
-    if (answered || now - altX > 120000) {
+    // ground: only when the game draws again, i.e. it took the answer (it misses short key presses while it waits, and
+    // closing on the key press left the player with no question in the headset and an unanswered game)
+    bool answered = !ground && ((GetAsyncKeyState('Y') & 0x8000) || (GetAsyncKeyState('N') & 0x8000) || (GetAsyncKeyState(VK_ESCAPE) & 0x8000));
+    bool resumed = ground && presentAge < 100;   // the game draws again: the question is gone
+    if (answered || resumed || now - altX > 120000) {
         asking = false; Vr_ShowMessage(0);
-        Log("[vr] quit question closed (%s)", answered ? "answered" : "timed out");
+        Log("[vr] quit question closed (%s, t %u)", answered ? "answered" : resumed ? "frames again" : "timed out", now - altX);
     }
 }
 // On the ground (bases, menus, PAD: no flight frame for 0.5 s) only "get cash" and "fast forward" apply; run from the idle

@@ -452,7 +452,7 @@ void Vr_SetFlightDialog(int x0, int y0, int x1, int y1) {
 static HWND GameWnd();
 // Message panel shown instead of the (frozen) game while a desktop tool of the game is open (p2den's Alt+J joystick setup)
 static Swap msgSc[3]; static bool msgReady[3]; static const int MSG_W = 1280, MSG_H = 200;
-static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt, 2 = quit question (Alt+X in flight)
+static volatile LONG s_msgShow;   // Vr_ShowMessage: 1 = entering-space prompt, 2 = quit question (Alt+X, in flight or on the ground)
 void Vr_ShowMessage(int which) { InterlockedExchange(&s_msgShow, which); }
 // cursor offset of the current 2D screen (PAD, nav map): reported while that cursor is drawn, forgotten 1 s after
 static volatile LONG s_curOff, s_curOffTick;
@@ -1030,7 +1030,7 @@ static void HandleEvents() {
         }
         if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             sessState = ((XrEventDataSessionStateChanged*)&ev)->state;
-            Log("[vr] session state %d", (int)sessState);
+            Log("[vr] session state %d (t %lu)", (int)sessState, GetTickCount() % 1000000);
             if (sessState == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo bi = {XR_TYPE_SESSION_BEGIN_INFO}; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                 if (XR_SUCCEEDED(xrBeginSession(sess, &bi))) sessRunning = true;

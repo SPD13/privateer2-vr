@@ -400,6 +400,9 @@ static void ReadbackHud(ID3D11Device* dev, ID3D11DeviceContext* c) {
         }
     }
 }
+// when p2den last presented a frame: it stops while the game waits for an answer (Alt+X "quit? (Y/N)")
+static volatile LONG gLastPresentTick;
+DWORD Capture_LastPresentTick() { return (DWORD)gLastPresentTick; }
 bool Capture_GetHudRGB(uint8_t* out) {   // 640*480*3
     if (!gHudRGBValid) return false;
     memcpy(out, gHudRGB, sizeof gHudRGB); return true;
@@ -491,6 +494,7 @@ static void CaptureFrame(IDXGISwapChain* sc) {
     if (gShared && d.SampleDesc.Count == 1) {
         c->CopyResource(gShared, bb); c->Flush();
         Vr_SetScreenSource(gSharedHandle, gW, gH, ++gFrame);
+        InterlockedExchange(&gLastPresentTick, (LONG)GetTickCount());
         ReadbackPalette(dev, c);
         ReadbackHud(dev, c);
         ComposeMirror(dev, c, bb, d);
