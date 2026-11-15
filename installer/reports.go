@@ -108,14 +108,43 @@ func listReports(game string) []sessionInfo {
 
 // captureDir: the folder of one capture, only for names the list could have given
 func captureDir(game, session, capture string) (string, error) {
-	if !safeName.MatchString(session) || !safeName.MatchString(capture) {
-		return "", fmt.Errorf("bad name")
+	if !safeName.MatchString(session) || !safeName.MatchString(capture) || strings.HasPrefix(session, ".") || strings.HasPrefix(capture, ".") {
+		return "", fmt.Errorf("bad name") // (".." would reach the folder above)
 	}
 	dir := filepath.Join(reportsDir(game), session, capture)
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
 		return "", fmt.Errorf("no such capture")
 	}
 	return dir, nil
+}
+
+// deleteCapture removes one capture, and its session folder once that holds no capture any more
+func deleteCapture(game, session, capture string) error {
+	dir, err := captureDir(game, session, capture)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	logf("bug report capture deleted: %s / %s", session, capture)
+	sdir := filepath.Join(reportsDir(game), session)
+	if rest, err := os.ReadDir(sdir); err == nil && len(rest) == 0 {
+		os.Remove(sdir)
+	}
+	return nil
+}
+
+// clearReports removes every capture of every session (the whole p2vr-reports folder)
+func clearReports(game string) error {
+	if game == "" {
+		return fmt.Errorf("no game folder")
+	}
+	if err := os.RemoveAll(reportsDir(game)); err != nil {
+		return err
+	}
+	logf("bug report captures cleared: %s", reportsDir(game))
+	return nil
 }
 
 func windowsVersion() string {

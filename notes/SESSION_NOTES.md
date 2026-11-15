@@ -68,6 +68,7 @@ Ship slots for other ships: `0x1D..0x94` (29..148).
 **Red confirmation message (`CheatMessage`, `DrawCheatOverlay`)**, drawn into the game's 8-bit frame so it shows on the monitor and in the headset:
 - **In flight** there is no hooked frame upload. The message is drawn into `g_lastCol` at the end of `PostHud`.
 - **On the ground** it is drawn through the capture overlay callback, on a copy of p2den's 8-bit frame upload.
+- **Width (v0.1.6):** in VR the panels take their rectangles out of the centre HUD (COMMS ends at x 124, GUNS starts at x 520), and `PanelLayout` runs before the message is drawn, so the panels are not grown around it. A message wider than `CHEAT_MAX_W` (372 px) wraps onto two lines inside the free middle. "CHEAT: NEXT JUMP GOES STRAIGHT TO THE DESTINATION" (x 100..540) lost both ends before.
 - **Colour:** pick the palette index with the best "red" score (`2R−G−B+R/2−1.5|G−B|`), on a black box (index 0) with an 8 px margin.
 - **Palette orientation:**
   - The flight HUD layer is displayed with red and blue swapped (see §4).
@@ -183,7 +184,10 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
 
 **Launcher** (Go + WebView2, `installer/`):
 - `reports.go` lists sessions and captures and builds the zip (`Downloads\P2VR-bug-report_<session>_<capture>.zip`: capture + `installer.log` + `system.txt`).
-- Routes: `/api/reports`, `/api/report-file`, `/api/report-zip`, `/api/report-reveal`.
+- Routes: `/api/reports`, `/api/report-file`, `/api/report-zip`, `/api/report-reveal`, `/api/report-delete` (one capture, or `all`: the whole `p2vr-reports` folder; v0.1.6).
+- Session and capture names starting with a dot are refused (`captureDir`): `safeName` alone let `..` reach the folder above.
+- The mod creates its session folder before every capture, since the launcher can delete it while the game runs.
+- Previews of different captures often look the same (black space): a player zipped an old capture by mistake, which is why deleting exists.
 - The "Report a bug" card is always open and reloads on window focus.
 - The issue template is `.github/ISSUE_TEMPLATE/bug_report.md`.
 
@@ -198,7 +202,8 @@ A capture finishes in `PostHud` (flight) or after a 2 s fallback, then shows "CA
 ## 9. Releases
 
 - Push a `vX.Y.Z` tag. The release workflow builds and publishes, and the notes list the commit titles since the previous tag.
-- **Launcher self-update:** an update started from the launcher in the game folder replaces that launcher while it runs, so the rest of that session runs the *old* launcher's code. v0.1.4 → v0.1.5 hit this: no bHaptics files until the launcher was reopened. Since v0.1.6 the launcher starts the new one and exits after replacing itself (`install` in `installer/app.go`, test `TestInstallRestartsReplacedLauncher`). Anything a new version must do at install time still has to be repeated at a later point (e.g. `ensureBhaptics` on Play in VR) for updates run by older launchers.
+- **Launcher self-update:** an update started from the launcher in the game folder replaces that launcher while it runs, so the rest of that session runs the *old* launcher's code. v0.1.4 → v0.1.5 hit this: no bHaptics files until the launcher was reopened. Since v0.1.5 (re-released) the launcher starts the new one and exits after replacing itself (`install` in `installer/app.go`, test `TestInstallRestartsReplacedLauncher`). Anything a new version must do at install time still has to be repeated at a later point (e.g. `ensureBhaptics` on Play in VR) for updates run by older launchers.
+- **Changed defaults:** the installer keeps players' `p2vr.ini` values, so a default changed in `dist/p2vr.ini` never reached players who already had the setting. v0.1.5 on Steam still had `PANEL_VELOCITY` from v0.1.0 (y 4, cutting "OBSERVER VIEW") while dev, with no PANEL lines, used the fixed built-in value. Since v0.1.6, `oldDefaults` (`installer/game.go`) lists earlier releases' defaults, and a value still equal to one takes the new default on install. Add the old value there whenever a default changes (`TestOldDefaultsAgainstShippedIni` checks the list). When dev and a player's install differ, diff their `p2vr.ini` first.
 - Commit titles are not player-friendly. After the workflow, rewrite the notes with `gh release edit vX.Y.Z --notes-file …`: keep the "## Install" paragraph and write a player-facing "## Changes" list. Skip dev-only items like the macro recorder and diagnostics.
 - Watch the run with `gh run watch <id> --exit-status`.
 - Released this session: v0.1.1 (panel fixes), v0.1.2 (cheats), v0.1.3 (bug reports, fast forward, messages, marker colours, fade, nav map fix).

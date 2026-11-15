@@ -206,7 +206,7 @@ If something doesn't work or looks wrong, a bug report with a capture of the pro
    - the game state: phase, position, target, shields, active cheats…
    - your settings (`p2vr.ini`) and the mod's log at that moment
 
-   You can make several captures; they are kept per session in the `p2vr-reports` folder of the game.
+   You can make several captures; they are kept per session in the `p2vr-reports` folder of the game. In the launcher, **Delete** under a capture removes it, and **Delete all captures** clears the list, so that only the captures of the problem you are reporting are left to pick from.
 2. **Make the bug report zip.** Open the launcher (the **Privateer 2 VR** shortcut) and click **Report a bug** at the bottom. It lists the captures of your recent sessions with a preview and a summary. Pick the one showing the problem and click **Save bug report (.zip)**. The zip is saved in your **Downloads** folder, with the launcher's log and basic system information (Windows version, mod and launcher versions).
 3. **Open a GitHub issue.** Click **Open a GitHub issue** in the same place (or go to [Issues](https://github.com/SPD13/privateer2-vr/issues) > *New issue* > *Bug report*). Describe what happened and how to make it happen, then drag the zip into the issue. GitHub accepts attachments up to 25 MB; if the zip is bigger, share it with a file sharing service and paste the link.
 

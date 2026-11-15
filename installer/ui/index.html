@@ -94,6 +94,9 @@ footer .help-link { font-size: 14px; color: var(--text); margin-bottom: 10px; }
 .cap img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 6px; background: #000; display: block; }
 .cap .t { font-weight: 600; font-size: 13px; margin-top: 5px; }
 .cap .s { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.capbox { display: flex; flex-direction: column; gap: 4px; }
+.capbox button.link { font-size: 12.5px; align-self: flex-start; color: var(--fail); }
+#clearConfirm { margin-top: 10px; background: var(--help-bg); border-radius: 8px; padding: 12px 14px; }
 footer .help-link button.link { font-size: 14px; color: var(--cyan); }
 footer button.github { display: inline-flex; align-items: center; gap: 6px; color: var(--text); text-decoration: none; }
 footer button.github:hover { text-decoration: underline; }
@@ -174,6 +177,11 @@ footer button.github:hover { text-decoration: underline; }
          <button id="saveZip" disabled>Save bug report (.zip)</button>
          <button class="secondary" id="openIssue">Open a GitHub issue</button>
          <button class="link" id="refreshReports">Refresh</button>
+         <button class="link" id="clearOpen" hidden>Delete all captures</button>
+      </div>
+      <div id="clearConfirm" hidden>
+         This deletes every saved capture from the game folder (<code>p2vr-reports</code>). Bug report zips already saved in Downloads are kept.
+         <div class="actions" style="margin-top:10px"><button class="danger" id="clearAll">Delete all captures</button><button class="secondary" id="clearCancel">Cancel</button></div>
       </div>
       <div class="msg info" id="zipDone" hidden></div>
    </section>
@@ -306,15 +314,23 @@ async function loadReports() {
    const sessions = r.ok ? await r.json() : [];
    const box = $('reports'), prev = picked;
    picked = null; $('saveZip').disabled = true;
-   if (!sessions || !sessions.length) {
+   const any = sessions && sessions.length;
+   $('clearOpen').hidden = !any; if (!any) $('clearConfirm').hidden = true;
+   if (!any) {
       box.innerHTML = '<div class="msg warn">No captures yet. In the game, press <b>Ctrl+F9</b> when the problem is on screen, then come back here.</div>';
       return;
    }
    box.innerHTML = sessions.map(s => `<div class="session"><h3>Session ${esc(s.name.replace('_', ' ').replace(/-(\d\d)-(\d\d)$/, ':$1:$2'))}</h3><div class="caps">` +
-      s.captures.map(c => `<button class="cap" data-s="${esc(s.name)}" data-c="${esc(c.name)}">` +
+      s.captures.map(c => `<div class="capbox"><button class="cap" data-s="${esc(s.name)}" data-c="${esc(c.name)}">` +
          (c.thumb ? `<img loading="lazy" src="/api/report-file?t=${token}&s=${encodeURIComponent(s.name)}&c=${encodeURIComponent(c.name)}&f=${encodeURIComponent(c.thumb)}">` : '<img>') +
-         `<div class="t">${esc(c.name)}</div><div class="s">${(c.summary || []).map(esc).join('<br>')}<br>${c.files} files, ${mb(c.size)}</div></button>`).join('') +
+         `<div class="t">${esc(c.name)}</div><div class="s">${(c.summary || []).map(esc).join('<br>')}<br>${c.files} files, ${mb(c.size)}</div></button>` +
+         `<button class="link capdel" data-s="${esc(s.name)}" data-c="${esc(c.name)}">Delete</button></div>`).join('') +
       '</div></div>').join('');
+   box.querySelectorAll('.capdel').forEach(b => b.onclick = async () => {
+      if (!confirm(`Delete ${b.dataset.c} of session ${b.dataset.s}?`)) return;
+      await api('report-delete', { session: b.dataset.s, capture: b.dataset.c });
+      loadReports();
+   });
    box.querySelectorAll('.cap').forEach(b => b.onclick = () => {
       box.querySelectorAll('.cap').forEach(x => x.classList.remove('selected'));
       b.classList.add('selected'); picked = { session: b.dataset.s, capture: b.dataset.c }; $('saveZip').disabled = false;
@@ -323,6 +339,9 @@ async function loadReports() {
 }
 $('report').onclick = () => { loadReports(); $('reportCard').scrollIntoView({ behavior: 'smooth' }); };
 $('refreshReports').onclick = loadReports;
+$('clearOpen').onclick = () => { $('clearConfirm').hidden = false; };
+$('clearCancel').onclick = () => { $('clearConfirm').hidden = true; };
+$('clearAll').onclick = async () => { $('clearConfirm').hidden = true; $('zipDone').hidden = true; await api('report-delete', { all: true }); loadReports(); };
 $('saveZip').onclick = async () => {
    if (!picked) return;
    $('saveZip').disabled = true; $('zipDone').hidden = false; $('zipDone').innerHTML = '<span class="spinner"></span> Making the zip…';

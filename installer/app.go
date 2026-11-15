@@ -480,11 +480,18 @@ func (a *app) install(shortcut bool) {
 		}
 		iniPath := filepath.Join(dir, settingsFile)
 		if old, err := os.ReadFile(iniPath); err == nil {
-			merged, added := mergeSettings(string(old), string(fresh), latest.Version)
-			if added > 0 {
+			updated, changed := updateOldDefaults(string(old), string(fresh))
+			merged, added := mergeSettings(updated, string(fresh), latest.Version)
+			if added > 0 || len(changed) > 0 {
 				if err := writeFile(iniPath, []byte(merged)); err != nil {
 					return err
 				}
+			}
+			if len(changed) > 0 {
+				logf("settings: old defaults updated: %s", strings.Join(changed, ", "))
+				a.line(job, "note", "%d setting(s) still at an earlier version's default updated to the new default", len(changed))
+			}
+			if added > 0 {
 				a.line(job, "note", "Your settings (p2vr.ini) are kept; %d new setting(s) added with their defaults", added)
 			} else {
 				a.line(job, "note", "Your settings (p2vr.ini) are kept")
@@ -859,6 +866,32 @@ func (a *app) routes(mux *http.ServeMux) {
 		data, _ := json.Marshal(map[string]any{"path": path, "size": size, "tooBig": size > githubIssueLimit})
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(data)
+	})
+	// deleting captures: one (session + capture), or all of them (all: true)
+	handle("/api/report-delete", "POST", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Session string `json:"session"`
+			Capture string `json:"capture"`
+			All     bool   `json:"all"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&b) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		a.mu.Lock()
+		game := a.state.Game.Path
+		a.mu.Unlock()
+		var err error
+		if b.All {
+			err = clearReports(game)
+		} else {
+			err = deleteCapture(game, b.Session, b.Capture)
+		}
+		if err != nil {
+			http.Error(w, "Could not delete: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	handle("/api/report-reveal", "POST", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {

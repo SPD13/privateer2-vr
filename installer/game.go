@@ -255,6 +255,61 @@ func processRunning(names ...string) bool {
 
 var iniKey = regexp.MustCompile(`^\s*([A-Za-z0-9_]+)\s*=`)
 
+// Defaults shipped by earlier releases and changed since (e.g. a panel moved so that it no longer cuts "OBSERVER VIEW").
+// A player's value equal to one of these was never chosen by them: it is replaced by the new default on update. Values
+// are compared without spaces. Add the old value here whenever a default in dist/p2vr.ini changes.
+var oldDefaults = map[string][]string{
+	"PANEL_VELOCITY":      {"236,4,406,58,0,24,0.36"},     // v0.1.0
+	"PANEL_COMMS":         {"0,0,124,140,-34,22,0.24"},    // v0.1.0 - v0.1.1
+	"PANEL_RADAR":         {"254,346,388,478,0,-28,0.30"}, // v0.1.0 - v0.1.1
+	"PANEL_MISSILES":      {"516,0,640,140,34,22,0.24"},   // v0.1.0
+	"RETICLE_GLASS_ALPHA": {"0.7"},                        // v0.1.0 - v0.1.2
+}
+
+// iniValue: a line's value without its comment and spaces
+func iniValue(l string) string {
+	v := l[strings.Index(l, "=")+1:]
+	if i := strings.Index(v, ";"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.Join(strings.Fields(v), "")
+}
+
+// updateOldDefaults replaces the values of old that are an earlier release's default by fresh's line for that setting
+func updateOldDefaults(old, fresh string) (string, []string) {
+	freshLine := map[string]string{}
+	for _, l := range strings.Split(strings.ReplaceAll(fresh, "\r\n", "\n"), "\n") {
+		if m := iniKey.FindStringSubmatch(l); m != nil {
+			freshLine[strings.ToUpper(m[1])] = strings.TrimSpace(l)
+		}
+	}
+	var changed []string
+	lines := strings.Split(old, "\n")
+	for i, l := range lines {
+		m := iniKey.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		k := strings.ToUpper(m[1])
+		nl, ok := freshLine[k]
+		if !ok || iniValue(nl) == iniValue(l) {
+			continue
+		}
+		for _, d := range oldDefaults[k] {
+			if iniValue(l) == d {
+				cr := strings.HasSuffix(l, "\r")
+				lines[i] = nl
+				if cr {
+					lines[i] += "\r"
+				}
+				changed = append(changed, k)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n"), changed
+}
+
 func mergeSettings(old, fresh, version string) (string, int) {
 	have := map[string]bool{}
 	lastSection := ""

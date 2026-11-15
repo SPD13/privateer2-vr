@@ -1673,7 +1673,10 @@ static const char* kCheatAction[CHEAT_COUNT] = {"cheat_restore", "cheat_destroy_
 // headset (on the HUD glass, centred above the crosshair, clear of the HUD panels) for 2.5 s.
 static char g_cheatMsg[96]; static DWORD g_cheatMsgUntil; static std::vector<uint8_t> g_cheatMask; static int g_cheatMaskFor = -1;
 static int g_cheatTextX0 = 0, g_cheatTextX1 = 640;   // horizontal extent of the text in the mask
-static const int CHEAT_MSG_Y = 132, CHEAT_MSG_H = 22;
+static int g_cheatRows = 22;                         // rows the text uses: one line, or two for a long message
+// In VR the HUD panels (HUD_PANELS) take their rectangles out of the centre HUD: COMMS ends at x 124, GUNS starts at x 520.
+// Text reaching into them was cut off (or lost, with those windows closed), so a message wider than CHEAT_MAX_W wraps.
+static const int CHEAT_MSG_Y = 132, CHEAT_LINE_H = 22, CHEAT_MSG_H = 2 * CHEAT_LINE_H, CHEAT_MAX_W = 372;
 static void CheatMessage(const char* fmt, ...) {
     va_list a; va_start(a, fmt); vsprintf_s(g_cheatMsg, fmt, a); va_end(a);
     g_cheatMsgUntil = GetTickCount() + 2500; g_cheatMaskFor = -1;
@@ -1696,7 +1699,15 @@ static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
             HGDIOBJ ob = SelectObject(dc, bmp);
             HFONT f = CreateFontA(18, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, NONANTIALIASED_QUALITY, 0, "Arial");
             HGDIOBJ of = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
-            RECT r = {0, 0, 640, CHEAT_MSG_H}; DrawTextA(dc, drawn, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT m = {0, 0, 640, CHEAT_LINE_H}; DrawTextA(dc, drawn, -1, &m, DT_CALCRECT | DT_SINGLELINE);
+            if (m.right - m.left <= CHEAT_MAX_W) {
+                RECT r = {0, 0, 640, CHEAT_LINE_H}; DrawTextA(dc, drawn, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                g_cheatRows = CHEAT_LINE_H;
+            } else {   // two lines, centred in the free middle of the HUD
+                RECT r = {(640 - CHEAT_MAX_W) / 2, 0, (640 + CHEAT_MAX_W) / 2, CHEAT_MSG_H};
+                DrawTextA(dc, drawn, -1, &r, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                g_cheatRows = CHEAT_MSG_H;
+            }
             GdiFlush();
             const uint8_t* px = (const uint8_t*)bits;
             for (int i = 0; i < 640 * CHEAT_MSG_H; i++) g_cheatMask[i] = px[i * 4 + 1] > 128;
@@ -1741,7 +1752,7 @@ static void DrawCheatOverlay(uint8_t* data, int pitch, int W, int H) {
             Log("[cheat] message colour index %d = %d,%d,%d (%s, palette from %s)", red, pal[red*4], pal[red*4+1], pal[red*4+2], flight ? "flight" : "ground", Capture_GetPalette(pal) ? "p2den" : "game"); } }
     float pw = H * 4.f / 3.f, ph = (float)H; if (pw > W) { pw = (float)W; ph = W * 3.f / 4.f; }   // the game's 4:3 picture
     float ox = (W - pw) * 0.5f, oy = (H - ph) * 0.5f, s = ph / 480.f;
-    int y0 = (int)(oy + CHEAT_MSG_Y * s), y1 = (int)(oy + (CHEAT_MSG_Y + CHEAT_MSG_H) * s), x0 = (int)ox, x1 = (int)(ox + pw);
+    int y0 = (int)(oy + CHEAT_MSG_Y * s), y1 = (int)(oy + (CHEAT_MSG_Y + g_cheatRows) * s), x0 = (int)ox, x1 = (int)(ox + pw);
     int sh = s >= 2 ? (int)s : 1;                                                        // shadow offset
     {   // black box behind the text (index 0: black on the screens; see-through on the VR HUD glass), 8 px margin
         int bx0 = (int)(ox + (g_cheatTextX0 - 8) * s), bx1 = (int)(ox + (g_cheatTextX1 + 8) * s);
@@ -1781,8 +1792,8 @@ static void BeginCapture(bool flight) {
     if (!g_capSession[0]) {
         SYSTEMTIME st; GetLocalTime(&st);
         sprintf_s(g_capSession, "%s\\%04d-%02d-%02d_%02d-%02d-%02d", reports, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        CreateDirectoryA(g_capSession, nullptr);
     }
+    CreateDirectoryA(g_capSession, nullptr);   // every time: the launcher can delete captures while the game runs
     g_capCount++;
     sprintf_s(g_capDir, "%s\\capture-%02d", g_capSession, g_capCount); CreateDirectoryA(g_capDir, nullptr);
     g_capOpened = GetTickCount();
